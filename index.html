@@ -1,0 +1,111 @@
+<!--UNFINISHED!!!-->
+<!--UNFINISHED!!!-->
+<!--UNFINISHED!!!-->
+<!--UNFINISHED!!!-->
+<!--UNFINISHED!!!-->
+<!--UNFINISHED!!!-->
+<!--UNFINISHED!!!-->
+<!--UNFINISHED!!!-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Telemetry</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background-color: #f4f4f9;
+      color: #333;
+    }
+    h1 {
+      font-size: 2.5em;
+      margin-bottom: 20px;
+      color: #007BFF;
+    }
+    #speed {
+      font-weight: bold;
+      color: #28a745;
+    }
+    #map {
+      width: 100%;
+      height: 400px;
+      margin-top: 20px;
+    }
+    .container {
+      text-align: center;
+      padding: 20px;
+      background: #fff;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+      border-radius: 8px;
+      width: 80%;
+      max-width: 800px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Telemetry</h1>
+    <p>Speed: <span id="speed">Loading...</span> mph</p>
+    <div id="map"></div>
+  </div>
+
+  <script>
+    // Initialize OpenStreetMap with Leaflet
+    const map = L.map('map').setView([29.76, -95.36], 12); // Default location (Houston, TX)
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    const marker = L.marker([29.76, -95.36]).addTo(map);
+
+    // Example Firebase connection (replace with your Firebase setup)
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      databaseURL: "https://YOUR_PROJECT_ID.firebaseio.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+
+    // Initialize Firebase
+    const app = firebase.initializeApp(firebaseConfig);
+    const database = firebase.database();
+
+    // Reference to the speed and location in the database
+    const speedRef = database.ref('/car/speed');
+    const locationRef = database.ref('/car/location');
+
+    // Real-time listener for speed
+    speedRef.on('value', (snapshot) => {
+      const speedKph = snapshot.val();
+      const speedMph = (speedKph * 0.621371).toFixed(2); // Convert km/h to mph
+      document.getElementById('speed').innerText = speedMph;
+    });
+
+    // Real-time listener for location
+    locationRef.on('value', (snapshot) => {
+      const location = snapshot.val().split(',');
+      const lat = parseFloat(location[0]);
+      const lng = parseFloat(location[1]);
+
+      // Update map center and marker position
+      const newPosition = [lat, lng];
+      map.setView(newPosition, 12);
+      marker.setLatLng(newPosition);
+    });
+  </script>
+</body>
+</html>
