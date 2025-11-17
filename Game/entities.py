@@ -58,6 +58,7 @@ class Player:
         self.xp_to_next = 100
 
         self.kills = 0
+        self.last_move_dir = (0.0, 0.0)
 
     def center(self):
         return (self.x, self.y)
@@ -140,6 +141,7 @@ class Player:
             vx /= mag
             vy /= mag
             speed = PLAYER_BASE_SPEED * self.speed_mult
+            self.last_move_dir = (vx, vy)
             new_x = self.x + vx * speed * dt
             new_y = self.y + vy * speed * dt
 
@@ -147,6 +149,8 @@ class Player:
                 self.x = new_x
             if not dungeon.is_solid_world(self.x, new_y):
                 self.y = new_y
+        else:
+            self.last_move_dir = (self.last_move_dir[0] * 0.92, self.last_move_dir[1] * 0.92)
 
     def start_dash(self, target_world_pos):
         if self.is_dashing:
