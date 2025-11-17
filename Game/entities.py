@@ -24,6 +24,7 @@ from config import (
     GREEN,
     YELLOW,
     PURPLE,
+    ORANGE,
 )
 from utils import clamp, distance
 from objects import Particle, Bullet
@@ -233,13 +234,17 @@ class Player:
 
 class Enemy:
     # simple chasing enemy
-    def __init__(self, x, y, hp_mult=1.0, speed_mult=1.0):
+    def __init__(self, x, y, hp_mult=1.0, speed_mult=1.0, elite=False):
         self.x = x
         self.y = y
         self.max_hp = int(ENEMY_BASE_HP * hp_mult)
         self.hp = self.max_hp
         self.speed_mult = speed_mult
         self.phase = 0.0
+        self.kind = "chaser"
+        self.color = PURPLE
+        self.size = 24
+        self.is_elite = elite
 
     def is_alive(self):
         return self.hp > 0
@@ -251,9 +256,9 @@ class Enemy:
             sp = 140
             vx = math.cos(ang) * sp
             vy = math.sin(ang) * sp
-            particles.append(Particle(self.x, self.y, vx, vy, 0.25, PURPLE))
+            particles.append(Particle(self.x, self.y, vx, vy, 0.25, self.color))
 
-    def update(self, dt, player_pos, dungeon):
+    def update(self, dt, player_pos, dungeon, enemy_bullets=None, rng=None, spawn_list=None):
         if not self.is_alive():
             return
 
@@ -282,17 +287,205 @@ class Enemy:
     def draw(self, surf, cam_x, cam_y):
         if not self.is_alive():
             return
-        r = pygame.Rect(0, 0, 24, 24)
+        r = pygame.Rect(0, 0, self.size, self.size)
         r.center = (self.x - cam_x, self.y - cam_y)
-        pygame.draw.rect(surf, PURPLE, r)
+        pygame.draw.rect(surf, self.color, r)
+        if self.is_elite:
+            pygame.draw.rect(surf, YELLOW, r, 2)
 
         # hp bar
         ratio = clamp(self.hp / self.max_hp, 0, 1)
-        bw = 22
+        bw = self.size - 2
         bx = r.centerx - bw // 2
         by = r.top - 6
         pygame.draw.rect(surf, (40, 40, 40), (bx, by, bw, 4))
         pygame.draw.rect(surf, RED, (bx, by, int(bw * ratio), 4))
+
+class RangedTurret(Enemy):
+    # stationary turret that fires aimed shots
+    def __init__(self, x, y, hp_mult=1.0, speed_mult=1.0, elite=False):
+        super().__init__(x, y, hp_mult, speed_mult, elite)
+        self.kind = "turret"
+        self.color = ORANGE
+        self.size = 22
+        self.shoot_timer = 1.4
+
+    def update(self, dt, player_pos, dungeon, enemy_bullets=None, rng=None, spawn_list=None):
+        if not self.is_alive():
+            return
+        self.shoot_timer -= dt
+        if enemy_bullets is None:
+            return
+        if self.shoot_timer <= 0:
+            self.shoot_timer = 1.4 if not self.is_elite else 1.0
+            px, py = player_pos
+            dx = px - self.x
+            dy = py - self.y
+            ang = math.atan2(dy, dx)
+            spread = 0.08 if not self.is_elite else 0.05
+            for i in range(-1, 2):
+                enemy_bullets.append(
+                    Bullet(
+                        self.x,
+                        self.y,
+                        ang + spread * i,
+                        BOSS_PROJECTILE_SPEED * 0.8,
+                        8 if not self.is_elite else 12,
+                        ORANGE,
+                    )
+                )
+
+    def draw(self, surf, cam_x, cam_y):
+        if not self.is_alive():
+            return
+        r = pygame.Rect(0, 0, self.size, self.size)
+        r.center = (self.x - cam_x, self.y - cam_y)
+        pygame.draw.ellipse(surf, self.color, r)
+        if self.is_elite:
+            pygame.draw.ellipse(surf, YELLOW, r, 2)
+        pygame.draw.circle(surf, RED, r.center, 4)
+
+class DasherEnemy(Enemy):
+    # bursts toward the player in quick dashes
+    def __init__(self, x, y, hp_mult=1.0, speed_mult=1.0, elite=False):
+        super().__init__(x, y, hp_mult, speed_mult, elite)
+        self.kind = "dasher"
+        self.color = CYAN
+        self.size = 22
+        self.dash_cooldown = 1.8
+        self.dash_timer = 0.0
+        self.dashing = False
+        self.dash_dir = (0.0, 0.0)
+
+    def update(self, dt, player_pos, dungeon, enemy_bullets=None, rng=None, spawn_list=None):
+        if not self.is_alive():
+            return
+
+        self.dash_timer -= dt
+        px, py = player_pos
+        dx = px - self.x
+        dy = py - self.y
+        dist = math.hypot(dx, dy) + 1e-6
+        dir_x = dx / dist
+        dir_y = dy / dist
+
+        if self.dashing:
+            speed = ENEMY_BASE_SPEED * self.speed_mult * 3.0
+            new_x = self.x + dir_x * speed * dt
+            new_y = self.y + dir_y * speed * dt
+            if not dungeon.is_solid_world(new_x, self.y):
+                self.x = new_x
+            if not dungeon.is_solid_world(self.x, new_y):
+                self.y = new_y
+            self.dash_timer -= dt
+            if self.dash_timer <= 0:
+                self.dashing = False
+                self.dash_timer = self.dash_cooldown
+            return
+
+        if self.dash_timer <= 0:
+            self.dashing = True
+            self.dash_timer = 0.45 if not self.is_elite else 0.6
+            return
+
+        speed = ENEMY_BASE_SPEED * self.speed_mult * 0.7
+        new_x = self.x + dir_x * speed * dt
+        new_y = self.y + dir_y * speed * dt
+        if not dungeon.is_solid_world(new_x, self.y):
+            self.x = new_x
+        if not dungeon.is_solid_world(self.x, new_y):
+            self.y = new_y
+
+    def draw(self, surf, cam_x, cam_y):
+        super().draw(surf, cam_x, cam_y)
+        if not self.is_alive():
+            return
+        cx = self.x - cam_x
+        cy = self.y - cam_y
+        if self.dashing:
+            pygame.draw.circle(surf, CYAN, (int(cx), int(cy)), self.size)
+
+class ShielderEnemy(Enemy):
+    # absorbs damage with a regenerating shield
+    def __init__(self, x, y, hp_mult=1.0, speed_mult=1.0, elite=False):
+        super().__init__(x, y, hp_mult, speed_mult, elite)
+        self.kind = "shielder"
+        self.color = GREEN
+        self.size = 26
+        self.shield_hp = 35 * (1.4 if elite else 1.0)
+        self.shield_cd = 0.0
+
+    def take_damage(self, dmg, particles):
+        if self.shield_hp > 0:
+            absorbed = min(dmg, self.shield_hp)
+            self.shield_hp -= absorbed
+            dmg -= absorbed
+            particles.append(Particle(self.x, self.y, 0, 0, 0.25, CYAN))
+        if dmg > 0:
+            super().take_damage(dmg, particles)
+
+    def update(self, dt, player_pos, dungeon, enemy_bullets=None, rng=None, spawn_list=None):
+        if not self.is_alive():
+            return
+        self.shield_cd = min(2.5, self.shield_cd + dt)
+        if self.shield_cd >= 2.5 and self.shield_hp <= 0:
+            self.shield_hp = 20 if not self.is_elite else 35
+            self.shield_cd = 0.0
+
+        super().update(dt, player_pos, dungeon, enemy_bullets, rng, spawn_list)
+
+    def draw(self, surf, cam_x, cam_y):
+        super().draw(surf, cam_x, cam_y)
+        if not self.is_alive():
+            return
+        cx = self.x - cam_x
+        cy = self.y - cam_y
+        if self.shield_hp > 0:
+            radius = int(self.size)
+            color = CYAN if not self.is_elite else YELLOW
+            pygame.draw.circle(surf, color, (int(cx), int(cy)), radius, 2)
+
+class SummonerEnemy(Enemy):
+    # periodically summons basic minions
+    def __init__(self, x, y, hp_mult=1.0, speed_mult=1.0, elite=False):
+        super().__init__(x, y, hp_mult, speed_mult, elite)
+        self.kind = "summoner"
+        self.color = (200, 120, 255)
+        self.size = 26
+        self.summon_timer = 5.0
+
+    def update(self, dt, player_pos, dungeon, enemy_bullets=None, rng=None, spawn_list=None):
+        if not self.is_alive():
+            return
+        self.summon_timer -= dt
+        if self.summon_timer <= 0 and spawn_list is not None and rng is not None:
+            self.summon_timer = 6.0 if not self.is_elite else 4.5
+            px, py = player_pos
+            offset_angle = rng.random() * math.tau
+            distance_offset = 60 + (30 if self.is_elite else 0)
+            sx = self.x + math.cos(offset_angle) * distance_offset
+            sy = self.y + math.sin(offset_angle) * distance_offset
+            spawn_list.append(
+                Enemy(sx, sy, hp_mult=0.8 if not self.is_elite else 1.2, speed_mult=1.0 + 0.1 * rng.random())
+            )
+        # light hover movement
+        px, py = player_pos
+        dx = px - self.x
+        dy = py - self.y
+        dist = math.hypot(dx, dy) + 1e-6
+        dir_x = dx / dist
+        dir_y = dy / dist
+        offset = math.sin(self.phase * 2.0) * 0.4
+        side_x = -dir_y * offset
+        side_y = dir_x * offset
+        speed = ENEMY_BASE_SPEED * self.speed_mult * 0.4
+        new_x = self.x + (dir_x + side_x) * speed * dt
+        new_y = self.y + (dir_y + side_y) * speed * dt
+        if not dungeon.is_solid_world(new_x, self.y):
+            self.x = new_x
+        if not dungeon.is_solid_world(self.x, new_y):
+            self.y = new_y
+        self.phase += dt
 
 class Boss:
     # big boss that shoots projectiles
@@ -304,6 +497,10 @@ class Boss:
         self.speed_mult = speed_mult
         self.shoot_timer = 1.5
         self.phase = 0.0
+        self.telegraphs = []
+        self.laser_angle = 0.0
+        self.wave_timer = 8.0
+        self.laser_timer = 0.0
 
     def is_alive(self):
         return self.hp > 0
@@ -317,7 +514,10 @@ class Boss:
             vy = math.sin(ang) * sp
             particles.append(Particle(self.x, self.y, vx, vy, 0.35, (255, 180, 180)))
 
-    def update(self, dt, player_pos, dungeon, boss_bullets):
+    def _spawn_telegraph(self, radius, delay, color):
+        self.telegraphs.append({"r": radius, "timer": delay, "color": color})
+
+    def update(self, dt, player_pos, dungeon, enemy_bullets, rng, spawn_list):
         if not self.is_alive():
             return
         px, py = player_pos
@@ -341,27 +541,90 @@ class Boss:
         if not dungeon.is_solid_world(self.x, new_y):
             self.y = new_y
 
-        # shooting pattern
-        self.shoot_timer -= dt
-        if self.shoot_timer <= 0:
-            self.shoot_timer = 1.4
-            base_angle = math.atan2(dy, dx)
-            for i in range(-2, 3):
-                ang = base_angle + i * 0.25
-                boss_bullets.append(
-                    Bullet(
-                        self.x,
-                        self.y,
-                        ang,
-                        BOSS_PROJECTILE_SPEED,
-                        10,
-                        (255, 140, 140),
+        hp_ratio = self.hp / max(1, self.max_hp)
+
+        # update tells
+        for t in list(self.telegraphs):
+            t["timer"] -= dt
+            if t["timer"] <= 0:
+                for i in range(12):
+                    ang = math.tau * (i / 12.0)
+                    enemy_bullets.append(
+                        Bullet(
+                            self.x,
+                            self.y,
+                            ang,
+                            BOSS_PROJECTILE_SPEED * 0.9,
+                            12,
+                            t["color"],
+                        )
                     )
-                )
+                self.telegraphs.remove(t)
+
+        # phase logic
+        self.shoot_timer -= dt
+        if hp_ratio > 0.66:
+            if self.shoot_timer <= 0:
+                self.shoot_timer = 1.4
+                base_angle = math.atan2(dy, dx)
+                for i in range(-2, 3):
+                    ang = base_angle + i * 0.25
+                    enemy_bullets.append(Bullet(self.x, self.y, ang, BOSS_PROJECTILE_SPEED, 10, (255, 140, 140)))
+        elif hp_ratio > 0.33:
+            if self.shoot_timer <= 0:
+                self.shoot_timer = 2.0
+                self._spawn_telegraph(60, 1.0, YELLOW)
+        else:
+            if self.shoot_timer <= 0:
+                self.shoot_timer = 1.6
+                self._spawn_telegraph(80, 1.2, ORANGE)
+            # rotating lasers
+            self.laser_timer -= dt
+            self.laser_angle += dt * 0.9
+            if self.laser_timer <= 0:
+                self.laser_timer = 0.25
+                for offset_ang in (0, math.pi / 2, math.pi):
+                    ang = self.laser_angle + offset_ang
+                    enemy_bullets.append(
+                        Bullet(
+                            self.x,
+                            self.y,
+                            ang,
+                            BOSS_PROJECTILE_SPEED * 1.2,
+                            14,
+                            (255, 200, 200),
+                        )
+                    )
+            # minion waves
+            self.wave_timer -= dt
+            if self.wave_timer <= 0 and rng is not None and spawn_list is not None:
+                self.wave_timer = 10.0
+                for _ in range(3):
+                    angle = rng.random() * math.tau
+                    dist_offset = 80 + rng.randint(0, 40)
+                    sx = self.x + math.cos(angle) * dist_offset
+                    sy = self.y + math.sin(angle) * dist_offset
+                    spawn_list.append(DasherEnemy(sx, sy, hp_mult=1.2, speed_mult=1.1))
 
     def draw(self, surf, cam_x, cam_y, screen_width):
         if not self.is_alive():
             return
+        # telegraphs
+        for t in self.telegraphs:
+            alpha = clamp(t["timer"], 0, 1)
+            color = (
+                int(t["color"][0] * alpha),
+                int(t["color"][1] * alpha),
+                int(t["color"][2] * alpha),
+            )
+            pygame.draw.circle(
+                surf,
+                color,
+                (int(self.x - cam_x), int(self.y - cam_y)),
+                int(t["r"] * (1.1 - alpha)),
+                2,
+            )
+
         r = pygame.Rect(0, 0, 70, 70)
         r.center = (self.x - cam_x, self.y - cam_y)
         pygame.draw.rect(surf, (130, 30, 30), r)
