@@ -2,6 +2,7 @@
 # player, enemy, and boss behavior. all comments are lowercase.
 
 import math
+import random
 import pygame
 
 from config import (
@@ -28,6 +29,65 @@ from config import (
 from utils import clamp, distance
 from objects import Particle, Bullet
 
+
+def _perk_list():
+    return [
+        {"id": "vigor", "name": "vigor", "desc": "+20 max hp and heal", "color": (230, 100, 100), "apply": lambda p: p._gain_max_hp(20)},
+        {"id": "battery", "name": "battery", "desc": "+20 max energy, regen +4", "color": (120, 200, 220), "apply": lambda p: p._gain_energy_pool(20, 4)},
+        {"id": "sprinter", "name": "sprinter", "desc": "+10% move speed", "color": (140, 200, 140), "apply": lambda p: p._mult_speed(0.10)},
+        {"id": "rapid_fire", "name": "rapid fire", "desc": "+12% fire rate", "color": (200, 200, 120), "apply": lambda p: p._mult_fire_rate(0.12)},
+        {"id": "power_shot", "name": "power shot", "desc": "+12% damage", "color": (255, 170, 110), "apply": lambda p: p._mult_damage(0.12)},
+        {"id": "focus", "name": "focus", "desc": "+8% crit chance", "color": (170, 200, 255), "apply": lambda p: p._add_crit(0.08)},
+        {"id": "leech", "name": "lifesteal", "desc": "+6% lifesteal", "color": (200, 120, 200), "apply": lambda p: p._add_lifesteal(0.06)},
+        {"id": "dash_drive", "name": "dash drive", "desc": "-20% dash energy cost", "color": (120, 255, 200), "apply": lambda p: p._mult_dash_cost(0.8)},
+    ]
+
+
+def _relic_defs():
+    return {
+        "blood_charm": {
+            "name": "blood charm",
+            "desc": "+10% lifesteal",
+            "color": (200, 70, 130),
+            "apply": lambda p: p._add_lifesteal(0.10),
+        },
+        "glass_eye": {
+            "name": "glass eye",
+            "desc": "+10% crit chance",
+            "color": (160, 200, 255),
+            "apply": lambda p: p._add_crit(0.10),
+        },
+        "warp_boots": {
+            "name": "warp boots",
+            "desc": "dash cost -25% and +5% speed",
+            "color": (120, 230, 180),
+            "apply": lambda p: (p._mult_dash_cost(0.75), p._mult_speed(0.05)),
+        },
+        "sun_core": {
+            "name": "sun core",
+            "desc": "+15% damage",
+            "color": (255, 200, 120),
+            "apply": lambda p: p._mult_damage(0.15),
+        },
+        "storm_sigil": {
+            "name": "storm sigil",
+            "desc": "+18% projectile speed",
+            "color": (120, 170, 255),
+            "apply": lambda p: p._mult_projectile_speed(0.18),
+        },
+        "vitality_vial": {
+            "name": "vitality vial",
+            "desc": "restore 40 hp",
+            "color": (255, 120, 120),
+            "apply": lambda p: p.heal(40),
+            "consumable": True,
+        },
+    }
+
+
+PERK_POOL = _perk_list()
+RELIC_POOL = _relic_defs()
+
 class Player:
     # handles movement, dash, shooting, xp, and stats
     def __init__(self, x, y):
@@ -38,10 +98,17 @@ class Player:
         self.hp = PLAYER_BASE_HP
         self.max_energy = PLAYER_BASE_ENERGY
         self.energy = PLAYER_BASE_ENERGY
+        self.energy_regen = PLAYER_ENERGY_REGEN
 
         self.speed_mult = 1.0
         self.damage_mult = 1.0
         self.fire_rate_mult = 1.0
+        self.projectile_speed_mult = 1.0
+
+        self.crit_chance = 0.05
+        self.crit_mult = 1.6
+        self.lifesteal = 0.0
+        self.dash_cost_mult = 1.0
 
         self.is_dashing = False
         self.dash_timer = 0.0
@@ -57,6 +124,10 @@ class Player:
         self.xp = 0
         self.xp_to_next = 100
 
+        self.pending_perk_choices = []
+        self.perk_history = []
+        self.relics = []
+
         self.kills = 0
 
     def center(self):
@@ -65,22 +136,80 @@ class Player:
     def add_xp(self, amount):
         self.xp += amount
 
-    def check_auto_level(self):
-        # automatically levels up and buffs stats
+    def check_level(self, rng):
+        # queues perk choices instead of auto stats
         leveled = False
         while self.xp >= self.xp_to_next:
             self.xp -= self.xp_to_next
             self.level += 1
             self.xp_to_next = int(self.xp_to_next * 1.35 + 40)
-            self.max_hp += 10
-            self.hp += 10
-            self.max_energy += 8
-            self.energy += 8
-            self.damage_mult += 0.07
-            self.fire_rate_mult += 0.06
-            self.speed_mult += 0.04
+            self.pending_perk_choices.append(self._generate_perk_choices(rng))
             leveled = True
         return leveled
+
+    def has_pending_perk(self):
+        return len(self.pending_perk_choices) > 0
+
+    def pop_perk_choices(self):
+        if self.pending_perk_choices:
+            return self.pending_perk_choices.pop(0)
+        return []
+
+    def apply_perk(self, perk_id):
+        perk = next((p for p in PERK_POOL if p["id"] == perk_id), None)
+        if perk is None:
+            return
+        perk["apply"](self)
+        self.perk_history.append(perk)
+
+    def add_relic(self, relic_id):
+        relic = RELIC_POOL.get(relic_id)
+        if relic is None:
+            return
+        relic["apply"](self)
+        if relic.get("consumable"):
+            return
+        self.relics.append(relic)
+
+    def _generate_perk_choices(self, rng):
+        count = 2 + rng.randint(0, 1)
+        picks = []
+        pool = list(PERK_POOL)
+        while len(picks) < count and pool:
+            choice = rng.choice(pool)
+            picks.append(choice)
+            pool.remove(choice)
+        return picks
+
+    def _gain_max_hp(self, amount):
+        self.max_hp += amount
+        self.hp = clamp(self.hp + amount, 0, self.max_hp)
+
+    def _gain_energy_pool(self, amount, regen_boost=0):
+        self.max_energy += amount
+        self.energy = clamp(self.energy + amount, 0, self.max_energy)
+        self.energy_regen += regen_boost
+
+    def _mult_speed(self, bonus):
+        self.speed_mult += bonus
+
+    def _mult_damage(self, bonus):
+        self.damage_mult += bonus
+
+    def _mult_fire_rate(self, bonus):
+        self.fire_rate_mult += bonus
+
+    def _add_crit(self, bonus):
+        self.crit_chance += bonus
+
+    def _add_lifesteal(self, bonus):
+        self.lifesteal += bonus
+
+    def _mult_dash_cost(self, mult):
+        self.dash_cost_mult *= mult
+
+    def _mult_projectile_speed(self, bonus):
+        self.projectile_speed_mult += bonus
 
     def heal(self, amount):
         self.hp = clamp(self.hp + amount, 0, self.max_hp)
@@ -105,7 +234,7 @@ class Player:
 
     def update(self, dt, keys, dungeon):
         self.iframes = max(0.0, self.iframes - dt)
-        self.energy = clamp(self.energy + PLAYER_ENERGY_REGEN * dt, 0, self.max_energy)
+        self.energy = clamp(self.energy + self.energy_regen * dt, 0, self.max_energy)
 
         # dash behavior
         if self.is_dashing:
@@ -151,7 +280,8 @@ class Player:
     def start_dash(self, target_world_pos):
         if self.is_dashing:
             return
-        if self.energy < DASH_COST:
+        dash_cost = DASH_COST * self.dash_cost_mult
+        if self.energy < dash_cost:
             return
 
         tx, ty = target_world_pos
@@ -161,7 +291,7 @@ class Player:
         self.dash_dir = (dx / mag, dy / mag)
         self.dash_timer = DASH_TIME
         self.is_dashing = True
-        self.energy -= DASH_COST
+        self.energy -= dash_cost
 
     def can_shoot(self, time_now):
         data = WEAPONS[self.current_weapon]
@@ -170,7 +300,8 @@ class Player:
 
     def shoot(self, target_world_pos, bullets, time_now, particles):
         data = WEAPONS[self.current_weapon]
-        if self.energy < data["energy"]:
+        energy_cost = data["energy"]
+        if self.energy < energy_cost:
             return
 
         tx, ty = target_world_pos
@@ -183,7 +314,7 @@ class Player:
         pellets = data["pellets"]
         spread = data["spread"]
         damage = int(data["damage"] * self.damage_mult)
-        speed = data["speed"]
+        speed = data["speed"] * self.projectile_speed_mult
         color = data["color"]
 
         if pellets == 1:
@@ -194,10 +325,19 @@ class Player:
                 for i in range(pellets)
             ]
 
-        for ang in angles:
-            bullets.append(Bullet(self.x, self.y, ang, speed, damage, color))
+        if self.current_weapon == "boomerang":
+            kind = "boomerang"
+        elif self.current_weapon == "rocket":
+            kind = "rocket"
+        else:
+            kind = "standard"
 
-        self.energy -= data["energy"]
+        for ang in angles:
+            crit = random.random() < self.crit_chance
+            dmg = int(damage * (self.crit_mult if crit else 1.0))
+            bullets.append(Bullet(self.x, self.y, ang, speed, dmg, color, crit=crit, kind=kind, owner=self))
+
+        self.energy -= energy_cost
         self.last_shot = time_now
 
         # muzzle flash

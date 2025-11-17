@@ -19,13 +19,14 @@ from config import (
     GREEN,
     CYAN,
     YELLOW,
+    WEAPONS,
 )
 from utils import format_time, draw_text_center, distance
 from seed import SeedRNG
 from timer import RunTimer
 from dungeon import Dungeon, BIOME_STYLES
-from entities import Player, Enemy, Boss
-from objects import Particle, Bullet, XpOrb, Portal
+from entities import Player, Enemy, Boss, PERK_POOL, RELIC_POOL
+from objects import Particle, Bullet, XpOrb, Portal, Pickup, RareChest
 
 class Game:
     def __init__(self):
@@ -38,7 +39,7 @@ class Game:
         self.small_font = pygame.font.SysFont("consolas", 16)
         self.big_font = pygame.font.SysFont("consolas", 40)
 
-        self.state = "MENU"  # MENU, RUNNING, PAUSED, GAME_OVER, VICTORY
+        self.state = "MENU"  # MENU, RUNNING, PAUSED, GAME_OVER, VICTORY, CHOOSING_PERK
         self.seed_input = ""
         self.rng = None
         self.timer = RunTimer()
@@ -53,8 +54,13 @@ class Game:
         self.boss_bullets = []
         self.particles = []
         self.xp_orbs = []
+        self.pickups = []
+        self.chests = []
         self.portal = None
         self.boss = None
+        self.boss_rewards_spawned = False
+
+        self.current_perk_choices = []
 
         self.enemy_spawn_timer = 0.0
         self.enemy_spawn_interval = 3.0
@@ -72,6 +78,7 @@ class Game:
         self.timer.start()
         self.floor = 1
         self.score = 0
+        self.current_perk_choices = []
         self._build_floor()
         self.state = "RUNNING"
 
@@ -93,8 +100,10 @@ class Game:
         self.boss_bullets = []
         self.particles = []
         self.xp_orbs = []
+        self.pickups = []
+        self.chests = []
         self.portal = None
-
+        
         hp_mult = 1.0 + 0.35 * (self.floor - 1)
         speed_mult = 1.0 + 0.18 * (self.floor - 1)
 
@@ -107,8 +116,14 @@ class Game:
         bx, by = self.dungeon.random_floor_pos()
         self.boss = Boss(bx, by, hp_mult=hp_mult, speed_mult=speed_mult)
 
+        # optional rare chest reward
+        if self.rng.random() < 0.55:
+            cx, cy = self.dungeon.random_floor_pos()
+            self.chests.append(RareChest(cx, cy))
+
         self.enemy_spawn_interval = max(1.4, 3.0 - 0.2 * (self.floor - 1))
         self.enemy_spawn_timer = 1.0
+        self.boss_rewards_spawned = False
 
     # ---------- event handling ----------
     def handle_events(self):
@@ -121,6 +136,8 @@ class Game:
                 self._handle_menu_event(event)
             elif self.state == "RUNNING":
                 self._handle_running_event(event)
+            elif self.state == "CHOOSING_PERK":
+                self._handle_perk_event(event)
             elif self.state == "PAUSED":
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     self.state = "RUNNING"
@@ -172,8 +189,81 @@ class Game:
                 # dash
                 self.player.start_dash(world)
 
+    def _handle_perk_event(self, event):
+        if event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                idx = {pygame.K_1: 0, pygame.K_2: 1, pygame.K_3: 2}[event.key]
+                self._select_perk(idx)
+
+    def _open_perk_choice(self):
+        if not self.player.has_pending_perk():
+            return
+        self.current_perk_choices = self.player.pop_perk_choices()
+        self.state = "CHOOSING_PERK"
+        self.timer.stop()
+
+    def _select_perk(self, index):
+        if not self.current_perk_choices:
+            return
+        if 0 <= index < len(self.current_perk_choices):
+            choice = self.current_perk_choices[index]
+            self.player.apply_perk(choice["id"])
+            self.current_perk_choices = []
+            if self.player.has_pending_perk():
+                self._open_perk_choice()
+            else:
+                self.state = "RUNNING"
+                self.timer.start()
+
+    def _choose_locked_weapon(self):
+        locked = [w for w in WEAPONS.keys() if w not in self.player.unlocked_weapons]
+        if not locked:
+            return None
+        return self.rng.choice(locked)
+
+    def _spawn_chest_reward(self, x, y):
+        weapon_choice = self._choose_locked_weapon()
+        if weapon_choice is not None and self.rng.random() < 0.35:
+            self.pickups.append(Pickup(x, y - 10, weapon_choice, "weapon", (220, 230, 255), weapon_choice))
+        else:
+            relic_id = self.rng.choice(list(RELIC_POOL.keys()))
+            relic = RELIC_POOL[relic_id]
+            self.pickups.append(Pickup(x, y - 10, relic["name"], "relic", relic["color"], relic_id))
+
+    def _spawn_boss_rewards(self):
+        relic_id = self.rng.choice(list(RELIC_POOL.keys()))
+        relic = RELIC_POOL[relic_id]
+        self.pickups.append(Pickup(self.boss.x - 24, self.boss.y - 10, relic["name"], "relic", relic["color"], relic_id))
+
+        weapon_choice = self._choose_locked_weapon()
+        if weapon_choice is not None:
+            self.pickups.append(Pickup(self.boss.x + 24, self.boss.y - 10, weapon_choice, "weapon", (220, 230, 255), weapon_choice))
+        else:
+            self.pickups.append(
+                Pickup(
+                    self.boss.x + 24,
+                    self.boss.y - 10,
+                    "tonic",
+                    "consumable",
+                    (180, 255, 200),
+                    {"heal": 35, "energy": 35},
+                )
+            )
+
+    def _collect_pickup(self, pickup):
+        if pickup.kind == "weapon":
+            self.player.unlocked_weapons.add(pickup.payload)
+        elif pickup.kind == "relic":
+            self.player.add_relic(pickup.payload)
+        elif pickup.kind == "consumable":
+            payload = pickup.payload
+            self.player.heal(payload.get("heal", 0))
+            self.player.give_energy(payload.get("energy", 0))
+
     # ---------- update ----------
     def update(self, dt):
+        if self.state == "CHOOSING_PERK":
+            return
         if self.state != "RUNNING":
             return
 
@@ -181,7 +271,20 @@ class Game:
 
         keys = pygame.key.get_pressed()
         self.player.update(dt, keys, self.dungeon)
-        self.player.check_auto_level()
+        if self.player.check_level(self.rng) or (self.player.has_pending_perk() and not self.current_perk_choices):
+            self._open_perk_choice()
+            return
+
+        for chest in self.chests:
+            chest.update(dt)
+            if chest.try_open(self.player.center()):
+                self._spawn_chest_reward(chest.x, chest.y)
+
+        for pickup in list(self.pickups):
+            pickup.update(dt)
+            if pickup.can_collect(self.player.center()):
+                self._collect_pickup(pickup)
+                self.pickups.remove(pickup)
 
         # camera follows player
         self.cam_x += ((self.player.x - WIDTH / 2) - self.cam_x) * 0.15
@@ -196,6 +299,9 @@ class Game:
             self.boss.update(dt, self.player.center(), self.dungeon, self.boss_bullets)
         elif self.portal is None:
             # boss dead, spawn portal once
+            if not self.boss_rewards_spawned:
+                self._spawn_boss_rewards()
+                self.boss_rewards_spawned = True
             self.portal = Portal(self.player.x, self.player.y - 40)
 
         # spawn new enemies periodically
@@ -234,6 +340,8 @@ class Game:
             for e in self.enemies:
                 if e.is_alive() and distance((b.x, b.y), (e.x, e.y)) < 18:
                     e.take_damage(b.damage, self.particles)
+                    if self.player.lifesteal > 0:
+                        self.player.heal(b.damage * self.player.lifesteal)
                     hit_any = True
                     if not e.is_alive():
                         self.player.kills += 1
@@ -243,6 +351,8 @@ class Game:
             if self.boss is not None and self.boss.is_alive():
                 if distance((b.x, b.y), (self.boss.x, self.boss.y)) < 40:
                     self.boss.take_damage(b.damage, self.particles)
+                    if self.player.lifesteal > 0:
+                        self.player.heal(b.damage * self.player.lifesteal)
                     hit_any = True
                     if not self.boss.is_alive():
                         self.score += 200
@@ -313,9 +423,15 @@ class Game:
         # draw dungeon tiles
         self.dungeon.draw(self.screen, self.cam_x, self.cam_y)
 
+        for chest in self.chests:
+            chest.draw(self.screen, self.cam_x, self.cam_y)
+
         # draw orbs
         for orb in self.xp_orbs:
             orb.draw(self.screen, self.cam_x, self.cam_y)
+
+        for pickup in self.pickups:
+            pickup.draw(self.screen, self.cam_x, self.cam_y)
 
         # draw bullets
         for b in self.bullets:
@@ -352,6 +468,9 @@ class Game:
 
         # hud
         self._draw_hud()
+
+        if self.state == "CHOOSING_PERK":
+            self._draw_perk_overlay()
 
         if self.state == "PAUSED":
             self._draw_pause()
@@ -406,19 +525,64 @@ class Game:
         wnames = sorted(list(self.player.unlocked_weapons))
         wx = WIDTH - 260
         wy = HEIGHT - 110
-        pygame.draw.rect(self.screen, (15, 15, 15), (wx, wy, 240, 80))
-        pygame.draw.rect(self.screen, GRAY, (wx, wy, 240, 80), 2)
+        panel_h = 140
+        pygame.draw.rect(self.screen, (15, 15, 15), (wx, wy - 40, 240, panel_h))
+        pygame.draw.rect(self.screen, GRAY, (wx, wy - 40, 240, panel_h), 2)
         label = self.small_font.render("weapons 1-3", True, WHITE)
-        self.screen.blit(label, (wx + 10, wy + 6))
+        self.screen.blit(label, (wx + 10, wy - 34))
 
         for i, name in enumerate(wnames[:3]):
             active = (name == self.player.current_weapon)
             col = CYAN if active else GRAY
             wt = self.small_font.render(f"{i+1}: {name}", True, col)
-            self.screen.blit(wt, (wx + 10 + i * 70, wy + 28))
+            self.screen.blit(wt, (wx + 10 + i * 70, wy - 12))
+
+        # perks row
+        perk_label = self.small_font.render("perks", True, WHITE)
+        self.screen.blit(perk_label, (wx + 10, wy + 12))
+        for i, perk in enumerate(self.player.perk_history[-6:]):
+            px = wx + 10 + i * 36
+            py = wy + 36
+            rect = pygame.Rect(px, py, 26, 26)
+            pygame.draw.rect(self.screen, perk.get("color", CYAN), rect)
+            pygame.draw.rect(self.screen, DARK_GRAY, rect, 2)
+
+        # relic row
+        relic_label = self.small_font.render("relics", True, WHITE)
+        self.screen.blit(relic_label, (wx + 10, wy + 72))
+        for i, relic in enumerate(self.player.relics[-6:]):
+            rx = wx + 10 + i * 36
+            ry = wy + 96
+            rect = pygame.Rect(rx, ry, 26, 26)
+            pygame.draw.rect(self.screen, relic.get("color", CYAN), rect)
+            pygame.draw.rect(self.screen, DARK_GRAY, rect, 2)
 
         # minimap
         self.dungeon.draw_minimap(self.screen, self.player.center(), self.floor, self.rng.seed_string)
+
+    def _draw_perk_overlay(self):
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 170))
+        self.screen.blit(overlay, (0, 0))
+
+        draw_text_center(self.screen, self.big_font, "level up!", WHITE, HEIGHT // 2 - 120)
+        draw_text_center(self.screen, self.small_font, "press 1-3 to choose a perk", GRAY, HEIGHT // 2 - 80)
+
+        total = len(self.current_perk_choices)
+        if total == 0:
+            return
+        spacing = 200
+        start_x = WIDTH // 2 - (spacing * (total - 1)) // 2
+        for i, perk in enumerate(self.current_perk_choices):
+            box = pygame.Rect(0, 0, 180, 110)
+            box.center = (start_x + i * spacing, HEIGHT // 2 + 20)
+            pygame.draw.rect(self.screen, DARK_GRAY, box.inflate(6, 6))
+            pygame.draw.rect(self.screen, perk.get("color", CYAN), box, 2)
+
+            key_txt = self.small_font.render(f"[{i+1}] {perk['name']}", True, WHITE)
+            self.screen.blit(key_txt, (box.x + 10, box.y + 10))
+            desc_txt = self.small_font.render(perk["desc"], True, WHITE)
+            self.screen.blit(desc_txt, (box.x + 10, box.y + 40))
 
     def _draw_pause(self):
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
