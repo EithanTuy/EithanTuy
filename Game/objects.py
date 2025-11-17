@@ -40,19 +40,35 @@ class Particle:
 
 class Bullet:
     # basic projectile
-    def __init__(self, x, y, angle, speed, damage, color):
+    def __init__(self, x, y, angle, speed, damage, color, crit=False, kind="standard", owner=None):
         self.x = x
         self.y = y
         self.vx = math.cos(angle) * speed
         self.vy = math.sin(angle) * speed
         self.damage = damage
         self.color = color
-        self.life = 1.3
+        self.crit = crit
+        self.kind = kind
+        self.owner = owner
+        self.age = 0.0
+        self.life = 1.8 if kind == "boomerang" else 1.3
 
     def update(self, dt, dungeon):
         self.x += self.vx * dt
         self.y += self.vy * dt
+        self.age += dt
         self.life -= dt
+
+        if self.kind == "boomerang" and self.owner is not None:
+            if self.age > 0.35:
+                dx = self.owner.x - self.x
+                dy = self.owner.y - self.y
+                dist = max(1.0, math.hypot(dx, dy))
+                speed = math.hypot(self.vx, self.vy)
+                self.vx = dx / dist * speed
+                self.vy = dy / dist * speed
+            if distance((self.x, self.y), (self.owner.x, self.owner.y)) < 18 and self.age > 0.25:
+                self.life = 0
 
         if dungeon.is_solid_world(self.x, self.y):
             self.life = 0
@@ -60,8 +76,14 @@ class Bullet:
     def draw(self, surf, cam_x, cam_y):
         if self.life <= 0:
             return
-        r = pygame.Rect(self.x - 3 - cam_x, self.y - 3 - cam_y, 6, 6)
-        pygame.draw.rect(surf, self.color, r)
+        size = 6 if self.kind != "rocket" else 8
+        r = pygame.Rect(self.x - size / 2 - cam_x, self.y - size / 2 - cam_y, size, size)
+        col = self.color
+        if self.crit:
+            col = (min(255, col[0] + 60), min(255, col[1] + 60), min(255, col[2] + 40))
+        pygame.draw.rect(surf, col, r)
+        if self.kind == "boomerang":
+            pygame.draw.rect(surf, (0, 0, 0), r, 1)
 
 class XpOrb:
     # xp orb dropped by enemies
@@ -83,6 +105,66 @@ class XpOrb:
     def draw(self, surf, cam_x, cam_y):
         r = pygame.Rect(self.x - 5 - cam_x, self.y - 5 - cam_y, 10, 10)
         pygame.draw.ellipse(surf, GREEN, r)
+
+
+class Pickup:
+    # weapon, relic, or consumable pickup
+    def __init__(self, x, y, label, kind, color, payload):
+        self.x = x
+        self.y = y
+        self.label = label
+        self.kind = kind
+        self.color = color
+        self.payload = payload
+        self.wobble = 0.0
+
+    def update(self, dt):
+        self.wobble += dt * 2.0
+
+    def can_collect(self, player_pos):
+        return distance((self.x, self.y), player_pos) < 28
+
+    def draw(self, surf, cam_x, cam_y):
+        bx = self.x - cam_x
+        by = self.y - cam_y + math.sin(self.wobble) * 3
+        rect = pygame.Rect(0, 0, 32, 20)
+        rect.center = (bx, by)
+        pygame.draw.rect(surf, (20, 20, 20), rect.inflate(4, 4))
+        pygame.draw.rect(surf, self.color, rect)
+        txt_font = pygame.font.SysFont("consolas", 14)
+        txt = txt_font.render(self.label, True, (0, 0, 0))
+        surf.blit(txt, (rect.centerx - txt.get_width() // 2, rect.centery - txt.get_height() // 2))
+
+
+class RareChest:
+    # optional floor reward, drops loot when opened
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.opened = False
+        self.timer = 0.0
+
+    def update(self, dt):
+        self.timer += dt
+
+    def try_open(self, player_pos):
+        if self.opened:
+            return False
+        if distance((self.x, self.y), player_pos) < 28:
+            self.opened = True
+            return True
+        return False
+
+    def draw(self, surf, cam_x, cam_y):
+        bx = self.x - cam_x
+        by = self.y - cam_y
+        rect = pygame.Rect(0, 0, 30, 22)
+        rect.center = (bx, by + math.sin(self.timer * 2) * 2)
+        color = ORANGE if not self.opened else (90, 50, 20)
+        pygame.draw.rect(surf, (20, 10, 5), rect.inflate(4, 4))
+        pygame.draw.rect(surf, color, rect)
+        if not self.opened:
+            pygame.draw.rect(surf, YELLOW, rect, 2)
 
 class Portal:
     # portal appears after boss dies and leads to next floor or victory
