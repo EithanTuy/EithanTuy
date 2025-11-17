@@ -19,12 +19,14 @@ from config import (
     GREEN,
     CYAN,
     YELLOW,
+    TILE_SIZE,
     WEAPONS,
 )
 from utils import format_time, draw_text_center, distance
 from seed import SeedRNG
 from timer import RunTimer
 from dungeon import Dungeon, BIOME_STYLES
+from entities import Player, Enemy, Boss
 from entities import Player, Enemy, Boss, PERK_POOL, RELIC_POOL
 from objects import Particle, Bullet, XpOrb, Portal, Pickup, RareChest
     YELLOW,
@@ -98,6 +100,12 @@ class Game:
         self.boss_bullets = []
         self.particles = []
         self.xp_orbs = []
+        self.portal = None
+        self.boss = None
+        self.interactables = []
+
+        self.enemy_spawn_timer = 0.0
+        self.enemy_spawn_interval = 3.0
         self.pickups = []
         self.chests = []
         self.portal = None
@@ -175,6 +183,7 @@ class Game:
         # pick biome from rng
         self.biome_name = self.rng.choice(BIOMES)
         self.dungeon = Dungeon(self.rng, self.biome_name)
+        self.interactables = list(self.dungeon.interactables)
 
         px, py = self.dungeon.random_floor_pos()
         if self.player is None:
@@ -282,6 +291,8 @@ class Game:
                 self.player.switch_weapon(1)
             if event.key == pygame.K_3:
                 self.player.switch_weapon(2)
+            if event.key == pygame.K_e:
+                self._interact_with_nearby()
         if event.type == pygame.MOUSEBUTTONDOWN:
             mx, my = pygame.mouse.get_pos()
             world = (mx + self.cam_x, my + self.cam_y)
@@ -481,13 +492,17 @@ class Game:
                 self.player.hurt(25 * dt, self.particles)
 
         # boss bullet damage
+        for b in self.boss_bullets:
+            if distance(self.player.center(), (b.x, b.y)) < 18:
+                self.player.hurt(40 * dt, self.particles)
         for b in self.enemy_bullets:
             if distance(self.player.center(), (b.x, b.y)) < 18:
                 self.player.hurt(b.damage * dt, self.particles)
 
-        # hazard damage (magma)
-        if self.dungeon.is_hazard_world(self.player.x, self.player.y):
-            self.player.hurt(30 * dt, self.particles)
+        # hazard effects
+        hazard = self.dungeon.hazard_at(self.player.x, self.player.y)
+        if hazard:
+            self._apply_hazard_effect(hazard, dt)
 
         # xp pickup
         for orb in list(self.xp_orbs):
@@ -538,6 +553,10 @@ class Game:
         # draw dungeon tiles
         self.dungeon.draw(self.screen, self.cam_x, self.cam_y)
 
+        # highlight nearby interactables
+        for obj in self.interactables:
+            if obj.is_active() and distance(self.player.center(), (obj.x, obj.y)) < 70:
+                self._draw_interact_prompt(obj)
         for chest in self.chests:
             chest.draw(self.screen, self.cam_x, self.cam_y)
 
@@ -687,6 +706,51 @@ class Game:
         # minimap
         self.dungeon.draw_minimap(self.screen, self.player.center(), self.floor, self.rng.seed_string)
 
+    def _interact_with_nearby(self):
+        best = None
+        best_d = 9999
+        for obj in self.interactables:
+            if not obj.is_active():
+                continue
+            d = distance(self.player.center(), (obj.x, obj.y))
+            if d < 70 and d < best_d:
+                best_d = d
+                best = obj
+        if best is not None:
+            best.interact(self.player, self.particles, self.rng)
+
+    def _apply_hazard_effect(self, hazard, dt):
+        htype = hazard.get("type")
+        if htype == "lava":
+            self.player.hurt(30 * dt, self.particles)
+        elif htype == "ice":
+            dx, dy = self.player.last_move_dir
+            slip_speed = 90
+            new_x = self.player.x + dx * slip_speed * dt
+            new_y = self.player.y + dy * slip_speed * dt
+            if not self.dungeon.is_solid_world(new_x, self.player.y):
+                self.player.x = new_x
+            if not self.dungeon.is_solid_world(self.player.x, new_y):
+                self.player.y = new_y
+        elif htype == "curse":
+            self.player.hurt(18 * dt, self.particles)
+            self.player.energy = max(0, self.player.energy - 10 * dt)
+        elif htype == "conveyor":
+            dir_x, dir_y = hazard.get("dir", (0, 0))
+            push = 130
+            new_x = self.player.x + dir_x * push * dt
+            new_y = self.player.y + dir_y * push * dt
+            if not self.dungeon.is_solid_world(new_x, self.player.y):
+                self.player.x = new_x
+            if not self.dungeon.is_solid_world(self.player.x, new_y):
+                self.player.y = new_y
+
+    def _draw_interact_prompt(self, obj):
+        hint_font = pygame.font.SysFont("consolas", 14)
+        text = hint_font.render("E", True, YELLOW)
+        bx = obj.x - self.cam_x - text.get_width() // 2
+        by = obj.y - self.cam_y - TILE_SIZE * 0.5
+        self.screen.blit(text, (bx, by))
     def _draw_perk_overlay(self):
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 170))

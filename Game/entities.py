@@ -163,6 +163,8 @@ class Player:
         self.xp = 0
         self.xp_to_next = 100
 
+        self.kills = 0
+        self.last_move_dir = (0.0, 0.0)
         self.pending_perk_choices = []
         self.perk_history = []
         self.relics = []
@@ -399,6 +401,7 @@ class Player:
             vx /= mag
             vy /= mag
             speed = PLAYER_BASE_SPEED * self.speed_mult
+            self.last_move_dir = (vx, vy)
             new_x = self.x + vx * speed * dt
             new_y = self.y + vy * speed * dt
 
@@ -406,6 +409,8 @@ class Player:
                 self.x = new_x
             if not dungeon.is_solid_world(self.x, new_y):
                 self.y = new_y
+        else:
+            self.last_move_dir = (self.last_move_dir[0] * 0.92, self.last_move_dir[1] * 0.92)
 
     def start_dash(self, target_world_pos):
         if self.is_dashing:
@@ -420,6 +425,7 @@ class Player:
         self.dash_dir = (dx / mag, dy / mag)
         self.dash_timer = DASH_TIME
         self.is_dashing = True
+        self.energy -= DASH_COST
         self.energy -= dash_cost
 
     def can_shoot(self, time_now):
@@ -429,6 +435,7 @@ class Player:
 
     def shoot(self, target_world_pos, bullets, time_now, particles):
         data = WEAPONS[self.current_weapon]
+        if self.energy < data["energy"]:
         energy_cost = data["energy"]
         if self.energy < energy_cost:
             return
@@ -443,6 +450,7 @@ class Player:
         pellets = data["pellets"]
         spread = data["spread"]
         damage = int(data["damage"] * self.damage_mult)
+        speed = data["speed"]
         speed = data["speed"] * self.projectile_speed_mult
         color = data["color"]
 
@@ -454,6 +462,10 @@ class Player:
                 for i in range(pellets)
             ]
 
+        for ang in angles:
+            bullets.append(Bullet(self.x, self.y, ang, speed, damage, color))
+
+        self.energy -= data["energy"]
         if self.current_weapon == "boomerang":
             kind = "boomerang"
         elif self.current_weapon == "rocket":

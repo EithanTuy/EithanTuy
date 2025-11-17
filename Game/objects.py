@@ -5,6 +5,10 @@ import math
 import pygame
 
 from config import CYAN, GREEN, YELLOW, PURPLE, ORANGE
+from config import TILE_SIZE, WEAPONS
+import pygame
+
+from config import CYAN, GREEN, YELLOW, PURPLE, ORANGE
 from config import TILE_SIZE
 from utils import clamp, distance
 
@@ -188,3 +192,83 @@ class Portal:
         pygame.draw.circle(surf, color2, (int(cx), int(cy)), int(r))
         pygame.draw.circle(surf, color1, (int(cx), int(cy)), int(r * 0.6))
         pygame.draw.circle(surf, (0, 0, 0), (int(cx), int(cy)), int(r * 0.4))
+
+
+INTERACTABLE_COLORS = {
+    "chest": YELLOW,
+    "altar": CYAN,
+    "vendor": ORANGE,
+}
+
+INTERACTABLE_MINIMAP = {
+    "chest": YELLOW,
+    "altar": CYAN,
+    "vendor": ORANGE,
+}
+
+
+class Interactable:
+    # simple interactable with small reward states
+    def __init__(self, kind, x, y):
+        self.kind = kind
+        self.x = x
+        self.y = y
+        self.state = "ready"
+        self.uses = 2 if kind == "vendor" else 1
+
+    def is_active(self):
+        return self.state in ("ready", "charging")
+
+    def interact(self, player, particles, rng=None):
+        if not self.is_active():
+            return
+        rng = rng or __import__("random")
+        if self.kind == "chest":
+            self.state = "opened"
+            player.add_xp(30)
+            player.give_energy(25)
+            player.heal(15)
+            self._burst_particles(particles, YELLOW)
+        elif self.kind == "altar":
+            self.state = "spent"
+            player.damage_mult += 0.05
+            player.heal(25)
+            self._burst_particles(particles, CYAN)
+        elif self.kind == "vendor":
+            self.uses -= 1
+            self._burst_particles(particles, ORANGE)
+            self._vendor_reward(player, rng)
+            if self.uses <= 0:
+                self.state = "spent"
+
+    def _vendor_reward(self, player, rng):
+        # either refill energy/hp or unlock a new weapon
+        missing_weapons = [w for w in WEAPONS.keys() if w not in player.unlocked_weapons]
+        if missing_weapons and rng.random() < 0.5:
+            new_w = rng.choice(missing_weapons)
+            player.unlocked_weapons.add(new_w)
+        else:
+            player.give_energy(35)
+            player.heal(20)
+
+    def _burst_particles(self, particles, color):
+        for i in range(10):
+            ang = math.tau * (i / 10.0)
+            vx = math.cos(ang) * 120
+            vy = math.sin(ang) * 120
+            particles.append(Particle(self.x, self.y, vx, vy, 0.3, color))
+
+    def draw(self, surf, cam_x, cam_y, font=None):
+        col = INTERACTABLE_COLORS.get(self.kind, GREEN)
+        if not self.is_active():
+            col = (90, 90, 90)
+        r = pygame.Rect(0, 0, TILE_SIZE * 0.6, TILE_SIZE * 0.6)
+        r.center = (self.x - cam_x, self.y - cam_y)
+        pygame.draw.rect(surf, col, r)
+        pygame.draw.rect(surf, (10, 10, 10), r, 2)
+
+        if font is None:
+            font = pygame.font.SysFont("consolas", 14)
+        letter = {"chest": "C", "altar": "A", "vendor": "V"}.get(self.kind, "?")
+        txt = font.render(letter, True, (0, 0, 0))
+        surf.blit(txt, (r.centerx - txt.get_width() // 2, r.centery - txt.get_height() // 2))

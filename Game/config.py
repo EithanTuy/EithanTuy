@@ -19,6 +19,37 @@ TILE_SIZE = 48
 
 BIOMES = ["cavern","ice","crypt","magma","machine"]
 
+# spawn tables for hazards + interactable objects per biome
+BIOME_FEATURES = {
+    "cavern": {
+        "hazards": [],
+        "objects": {"chest": 0.10, "altar": 0.06, "vendor": 0.04},
+        "templates": {"treasure": 0.45, "shrine": 0.3, "trap": 0.25},
+    },
+    "ice": {
+        "hazards": [{"type": "ice", "prob": 0.035}],
+        "objects": {"chest": 0.12, "altar": 0.05, "vendor": 0.03},
+        "templates": {"treasure": 0.45, "shrine": 0.25, "trap": 0.30},
+    },
+    "crypt": {
+        "hazards": [{"type": "curse", "prob": 0.03}],
+        "objects": {"chest": 0.11, "altar": 0.08, "vendor": 0.03},
+        "templates": {"treasure": 0.4, "shrine": 0.35, "trap": 0.25},
+    },
+    "magma": {
+        "hazards": [{"type": "lava", "prob": 0.035}],
+        "objects": {"chest": 0.14, "altar": 0.04, "vendor": 0.04},
+        "templates": {"treasure": 0.45, "shrine": 0.2, "trap": 0.35},
+    },
+    "machine": {
+        "hazards": [
+            {"type": "conveyor", "prob": 0.028, "dirs": [(1, 0), (-1, 0), (0, 1), (0, -1)]}
+        ],
+        "objects": {"chest": 0.1, "altar": 0.05, "vendor": 0.06},
+        "templates": {"treasure": 0.35, "shrine": 0.25, "trap": 0.4},
+    },
+}
+
 ENEMY_BASE_HP = 40
 ENEMY_BASE_SPEED = 140
 
