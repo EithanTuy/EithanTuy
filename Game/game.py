@@ -77,6 +77,33 @@ class Game:
         self._build_floor()
         self.state = "RUNNING"
 
+    def _enemy_scalars(self):
+        hp_mult = 1.0 + 0.35 * (self.floor - 1)
+        speed_mult = 1.0 + 0.18 * (self.floor - 1)
+        return hp_mult, speed_mult
+
+    def _choose_enemy_class(self):
+        pool = ENEMY_POOLS.get(self.biome_name, ENEMY_POOLS["cavern"])
+        choices = [p for p in pool if self.floor >= p.get("min_floor", 1)]
+        total = sum(p["weight"] * (1 + 0.12 * (self.floor - 1)) for p in choices)
+        pick = self.rng.random() * total
+        accum = 0.0
+        for p in choices:
+            accum += p["weight"] * (1 + 0.12 * (self.floor - 1))
+            if pick <= accum:
+                return p["cls"]
+        return choices[-1]["cls"]
+
+    def _spawn_enemy(self, elite=False):
+        hp_mult, speed_mult = self._enemy_scalars()
+        if elite:
+            hp_mult *= 1.6
+            speed_mult *= 1.1
+        ex, ey = self.dungeon.random_floor_pos()
+        cls = self._choose_enemy_class()
+        enemy = cls(ex, ey, hp_mult=hp_mult, speed_mult=speed_mult, elite=elite)
+        self.enemies.append(enemy)
+
     def _build_floor(self):
         # pick biome from rng
         self.biome_name = self.rng.choice(BIOMES)
@@ -93,7 +120,7 @@ class Game:
 
         self.enemies = []
         self.bullets = []
-        self.boss_bullets = []
+        self.enemy_bullets = []
         self.particles = []
         self.xp_orbs = []
         self.portal = None
@@ -103,8 +130,7 @@ class Game:
 
         # spawn some starting enemies
         for _ in range(6 + self.floor * 2):
-            ex, ey = self.dungeon.random_floor_pos()
-            self.enemies.append(Enemy(ex, ey, hp_mult=hp_mult, speed_mult=speed_mult))
+            self._spawn_enemy()
 
         # make boss for this floor
         bx, by = self.dungeon.random_floor_pos()
@@ -112,6 +138,7 @@ class Game:
 
         self.enemy_spawn_interval = max(1.4, 3.0 - 0.2 * (self.floor - 1))
         self.enemy_spawn_timer = 1.0
+        self.elite_spawn_timer = max(10.0, 18.0 - self.floor * 1.5)
 
     # ---------- event handling ----------
     def handle_events(self):
@@ -193,24 +220,30 @@ class Game:
         self.cam_y += ((self.player.y - HEIGHT / 2) - self.cam_y) * 0.15
 
         # enemies
+        spawned = []
         for e in self.enemies:
-            e.update(dt, self.player.center(), self.dungeon)
+            e.update(dt, self.player.center(), self.dungeon, self.enemy_bullets, self.rng, spawned)
+        if spawned:
+            self.enemies.extend(spawned)
 
         # boss
         if self.boss is not None and self.boss.is_alive():
-            self.boss.update(dt, self.player.center(), self.dungeon, self.boss_bullets)
+            self.boss.update(dt, self.player.center(), self.dungeon, self.enemy_bullets, self.rng, spawned)
+            if spawned:
+                self.enemies.extend(spawned)
         elif self.portal is None:
             # boss dead, spawn portal once
             self.portal = Portal(self.player.x, self.player.y - 40)
 
         # spawn new enemies periodically
         self.enemy_spawn_timer -= dt
+        self.elite_spawn_timer -= dt
         if self.enemy_spawn_timer <= 0:
             self.enemy_spawn_timer = self.enemy_spawn_interval
-            hp_mult = 1.0 + 0.35 * (self.floor - 1)
-            speed_mult = 1.0 + 0.18 * (self.floor - 1)
-            ex, ey = self.dungeon.random_floor_pos()
-            self.enemies.append(Enemy(ex, ey, hp_mult=hp_mult, speed_mult=speed_mult))
+            self._spawn_enemy()
+        if self.elite_spawn_timer <= 0:
+            self.elite_spawn_timer = max(12.0, 20.0 - self.floor * 2)
+            self._spawn_enemy(elite=True)
 
         # bullets
         for b in list(self.bullets):
@@ -218,10 +251,10 @@ class Game:
             if b.life <= 0:
                 self.bullets.remove(b)
 
-        for b in list(self.boss_bullets):
+        for b in list(self.enemy_bullets):
             b.update(dt, self.dungeon)
             if b.life <= 0:
-                self.boss_bullets.remove(b)
+                self.enemy_bullets.remove(b)
 
         # xp orbs
         for orb in self.xp_orbs:
@@ -331,7 +364,7 @@ class Game:
         # draw bullets
         for b in self.bullets:
             b.draw(self.screen, self.cam_x, self.cam_y)
-        for b in self.boss_bullets:
+        for b in self.enemy_bullets:
             b.draw(self.screen, self.cam_x, self.cam_y)
 
         # draw enemies and boss
