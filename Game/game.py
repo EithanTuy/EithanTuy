@@ -27,6 +27,50 @@ from timer import RunTimer
 from dungeon import Dungeon, BIOME_STYLES
 from entities import Player, Enemy, Boss, PERK_POOL, RELIC_POOL
 from objects import Particle, Bullet, XpOrb, Portal, Pickup, RareChest
+    YELLOW,
+)
+from utils import format_time, draw_text_center, distance
+from seed import SeedRNG
+from timer import RunTimer
+from dungeon import Dungeon, BIOME_STYLES
+from entities import (
+    Player,
+    Enemy,
+    RangedTurret,
+    DasherEnemy,
+    ShielderEnemy,
+    SummonerEnemy,
+    Boss,
+)
+
+ENEMY_POOLS = {
+    "cavern": [
+        {"cls": Enemy, "weight": 1.0, "min_floor": 1},
+        {"cls": DasherEnemy, "weight": 0.7, "min_floor": 1},
+        {"cls": SummonerEnemy, "weight": 0.4, "min_floor": 2},
+    ],
+    "ice": [
+        {"cls": Enemy, "weight": 0.9, "min_floor": 1},
+        {"cls": RangedTurret, "weight": 0.9, "min_floor": 1},
+        {"cls": ShielderEnemy, "weight": 0.6, "min_floor": 2},
+    ],
+    "crypt": [
+        {"cls": Enemy, "weight": 0.9, "min_floor": 1},
+        {"cls": ShielderEnemy, "weight": 0.7, "min_floor": 1},
+        {"cls": SummonerEnemy, "weight": 0.6, "min_floor": 2},
+    ],
+    "magma": [
+        {"cls": Enemy, "weight": 0.8, "min_floor": 1},
+        {"cls": DasherEnemy, "weight": 0.8, "min_floor": 1},
+        {"cls": RangedTurret, "weight": 0.8, "min_floor": 2},
+    ],
+    "machine": [
+        {"cls": Enemy, "weight": 0.6, "min_floor": 1},
+        {"cls": RangedTurret, "weight": 1.0, "min_floor": 1},
+        {"cls": ShielderEnemy, "weight": 0.6, "min_floor": 2},
+    ],
+}
+from objects import Particle, Bullet, XpOrb, Portal
 
 class Game:
     def __init__(self):
@@ -64,6 +108,20 @@ class Game:
 
         self.enemy_spawn_timer = 0.0
         self.enemy_spawn_interval = 3.0
+        self.dungeon = None
+        self.player = None
+
+        self.enemies = []
+        self.bullets = []
+        self.enemy_bullets = []
+        self.particles = []
+        self.xp_orbs = []
+        self.portal = None
+        self.boss = None
+
+        self.enemy_spawn_timer = 0.0
+        self.enemy_spawn_interval = 3.0
+        self.elite_spawn_timer = 12.0
 
         self.cam_x = 0.0
         self.cam_y = 0.0
@@ -71,6 +129,8 @@ class Game:
         self.score = 0
 
     # ---------- setup ----------
+    def start_run(self):
+        # initialize rng from seed text
     def start_run(self):
         # initialize rng from seed text
         self.rng = SeedRNG(self.seed_input)
@@ -81,6 +141,35 @@ class Game:
         self.current_perk_choices = []
         self._build_floor()
         self.state = "RUNNING"
+        self._build_floor()
+        self.state = "RUNNING"
+
+    def _enemy_scalars(self):
+        hp_mult = 1.0 + 0.35 * (self.floor - 1)
+        speed_mult = 1.0 + 0.18 * (self.floor - 1)
+        return hp_mult, speed_mult
+
+    def _choose_enemy_class(self):
+        pool = ENEMY_POOLS.get(self.biome_name, ENEMY_POOLS["cavern"])
+        choices = [p for p in pool if self.floor >= p.get("min_floor", 1)]
+        total = sum(p["weight"] * (1 + 0.12 * (self.floor - 1)) for p in choices)
+        pick = self.rng.random() * total
+        accum = 0.0
+        for p in choices:
+            accum += p["weight"] * (1 + 0.12 * (self.floor - 1))
+            if pick <= accum:
+                return p["cls"]
+        return choices[-1]["cls"]
+
+    def _spawn_enemy(self, elite=False):
+        hp_mult, speed_mult = self._enemy_scalars()
+        if elite:
+            hp_mult *= 1.6
+            speed_mult *= 1.1
+        ex, ey = self.dungeon.random_floor_pos()
+        cls = self._choose_enemy_class()
+        enemy = cls(ex, ey, hp_mult=hp_mult, speed_mult=speed_mult, elite=elite)
+        self.enemies.append(enemy)
 
     def _build_floor(self):
         # pick biome from rng
@@ -112,6 +201,18 @@ class Game:
             ex, ey = self.dungeon.random_floor_pos()
             self.enemies.append(Enemy(ex, ey, hp_mult=hp_mult, speed_mult=speed_mult))
 
+        self.enemy_bullets = []
+        self.particles = []
+        self.xp_orbs = []
+        self.portal = None
+
+        hp_mult = 1.0 + 0.35 * (self.floor - 1)
+        speed_mult = 1.0 + 0.18 * (self.floor - 1)
+
+        # spawn some starting enemies
+        for _ in range(6 + self.floor * 2):
+            self._spawn_enemy()
+
         # make boss for this floor
         bx, by = self.dungeon.random_floor_pos()
         self.boss = Boss(bx, by, hp_mult=hp_mult, speed_mult=speed_mult)
@@ -124,6 +225,9 @@ class Game:
         self.enemy_spawn_interval = max(1.4, 3.0 - 0.2 * (self.floor - 1))
         self.enemy_spawn_timer = 1.0
         self.boss_rewards_spawned = False
+        self.enemy_spawn_interval = max(1.4, 3.0 - 0.2 * (self.floor - 1))
+        self.enemy_spawn_timer = 1.0
+        self.elite_spawn_timer = max(10.0, 18.0 - self.floor * 1.5)
 
     # ---------- event handling ----------
     def handle_events(self):
@@ -291,8 +395,11 @@ class Game:
         self.cam_y += ((self.player.y - HEIGHT / 2) - self.cam_y) * 0.15
 
         # enemies
+        spawned = []
         for e in self.enemies:
-            e.update(dt, self.player.center(), self.dungeon)
+            e.update(dt, self.player.center(), self.dungeon, self.enemy_bullets, self.rng, spawned)
+        if spawned:
+            self.enemies.extend(spawned)
 
         # boss
         if self.boss is not None and self.boss.is_alive():
@@ -302,16 +409,24 @@ class Game:
             if not self.boss_rewards_spawned:
                 self._spawn_boss_rewards()
                 self.boss_rewards_spawned = True
+        # boss
+        if self.boss is not None and self.boss.is_alive():
+            self.boss.update(dt, self.player.center(), self.dungeon, self.enemy_bullets, self.rng, spawned)
+            if spawned:
+                self.enemies.extend(spawned)
+        elif self.portal is None:
+            # boss dead, spawn portal once
             self.portal = Portal(self.player.x, self.player.y - 40)
 
         # spawn new enemies periodically
         self.enemy_spawn_timer -= dt
+        self.elite_spawn_timer -= dt
         if self.enemy_spawn_timer <= 0:
             self.enemy_spawn_timer = self.enemy_spawn_interval
-            hp_mult = 1.0 + 0.35 * (self.floor - 1)
-            speed_mult = 1.0 + 0.18 * (self.floor - 1)
-            ex, ey = self.dungeon.random_floor_pos()
-            self.enemies.append(Enemy(ex, ey, hp_mult=hp_mult, speed_mult=speed_mult))
+            self._spawn_enemy()
+        if self.elite_spawn_timer <= 0:
+            self.elite_spawn_timer = max(12.0, 20.0 - self.floor * 2)
+            self._spawn_enemy(elite=True)
 
         # bullets
         for b in list(self.bullets):
@@ -319,10 +434,10 @@ class Game:
             if b.life <= 0:
                 self.bullets.remove(b)
 
-        for b in list(self.boss_bullets):
+        for b in list(self.enemy_bullets):
             b.update(dt, self.dungeon)
             if b.life <= 0:
-                self.boss_bullets.remove(b)
+                self.enemy_bullets.remove(b)
 
         # xp orbs
         for orb in self.xp_orbs:
@@ -366,9 +481,9 @@ class Game:
                 self.player.hurt(25 * dt, self.particles)
 
         # boss bullet damage
-        for b in self.boss_bullets:
+        for b in self.enemy_bullets:
             if distance(self.player.center(), (b.x, b.y)) < 18:
-                self.player.hurt(40 * dt, self.particles)
+                self.player.hurt(b.damage * dt, self.particles)
 
         # hazard damage (magma)
         if self.dungeon.is_hazard_world(self.player.x, self.player.y):
@@ -437,6 +552,18 @@ class Game:
         for b in self.bullets:
             b.draw(self.screen, self.cam_x, self.cam_y)
         for b in self.boss_bullets:
+            b.draw(self.screen, self.cam_x, self.cam_y)
+        # draw dungeon tiles
+        self.dungeon.draw(self.screen, self.cam_x, self.cam_y)
+
+        # draw orbs
+        for orb in self.xp_orbs:
+            orb.draw(self.screen, self.cam_x, self.cam_y)
+
+        # draw bullets
+        for b in self.bullets:
+            b.draw(self.screen, self.cam_x, self.cam_y)
+        for b in self.enemy_bullets:
             b.draw(self.screen, self.cam_x, self.cam_y)
 
         # draw enemies and boss
