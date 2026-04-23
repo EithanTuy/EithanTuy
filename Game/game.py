@@ -1,842 +1,444 @@
-# game.py
-# main game loop with seed input, speedrun timer, floors, and all systems wired together.
-# all comments are lowercase.
+import json
+import math
+import os
+import array
+from dataclasses import dataclass
 
 import pygame
-import sys
-import math
 
-from config import (
-    WIDTH,
-    HEIGHT,
-    FPS,
-    MAX_FLOORS,
-    BIOMES,
-    BLACK,
-    WHITE,
-    GRAY,
-    DARK_GRAY,
-    GREEN,
-    CYAN,
-    YELLOW,
-    TILE_SIZE,
-    WEAPONS,
-)
-from utils import format_time, draw_text_center, distance
-from seed import SeedRNG
-from timer import RunTimer
-from dungeon import Dungeon, BIOME_STYLES
-from entities import Player, Enemy, Boss
-from entities import Player, Enemy, Boss, PERK_POOL, RELIC_POOL
-from objects import Particle, Bullet, XpOrb, Portal, Pickup, RareChest
-    YELLOW,
-)
-from utils import format_time, draw_text_center, distance
-from seed import SeedRNG
-from timer import RunTimer
-from dungeon import Dungeon, BIOME_STYLES
-from entities import (
-    Player,
-    Enemy,
-    RangedTurret,
-    DasherEnemy,
-    ShielderEnemy,
-    SummonerEnemy,
-    Boss,
-)
+# screen + physics constants
+WIDTH, HEIGHT = 1000, 600
+FPS = 60
+GRAVITY = 0.6
+MOVE_SPEED = 5.2
+JUMP_SPEED = -12.5
+PLAYER_W, PLAYER_H = 34, 46
+MAX_LEVEL_TIME = 90  # seconds
 
-ENEMY_POOLS = {
-    "cavern": [
-        {"cls": Enemy, "weight": 1.0, "min_floor": 1},
-        {"cls": DasherEnemy, "weight": 0.7, "min_floor": 1},
-        {"cls": SummonerEnemy, "weight": 0.4, "min_floor": 2},
-    ],
-    "ice": [
-        {"cls": Enemy, "weight": 0.9, "min_floor": 1},
-        {"cls": RangedTurret, "weight": 0.9, "min_floor": 1},
-        {"cls": ShielderEnemy, "weight": 0.6, "min_floor": 2},
-    ],
-    "crypt": [
-        {"cls": Enemy, "weight": 0.9, "min_floor": 1},
-        {"cls": ShielderEnemy, "weight": 0.7, "min_floor": 1},
-        {"cls": SummonerEnemy, "weight": 0.6, "min_floor": 2},
-    ],
-    "magma": [
-        {"cls": Enemy, "weight": 0.8, "min_floor": 1},
-        {"cls": DasherEnemy, "weight": 0.8, "min_floor": 1},
-        {"cls": RangedTurret, "weight": 0.8, "min_floor": 2},
-    ],
-    "machine": [
-        {"cls": Enemy, "weight": 0.6, "min_floor": 1},
-        {"cls": RangedTurret, "weight": 1.0, "min_floor": 1},
-        {"cls": ShielderEnemy, "weight": 0.6, "min_floor": 2},
-    ],
-}
-from objects import Particle, Bullet, XpOrb, Portal
+DATA_PATH = os.path.join(os.path.dirname(__file__), "highscores.json")
 
-class Game:
+
+@dataclass
+class Platform:
+    rect: pygame.Rect
+    moving: bool = False
+    axis: str = "x"
+    min_pos: int = 0
+    max_pos: int = 0
+    speed: float = 0
+    direction: int = 1
+
+    def update(self):
+        if not self.moving:
+            return 0, 0
+        dx = dy = 0
+        if self.axis == "x":
+            dx = self.speed * self.direction
+            self.rect.x += int(dx)
+            if self.rect.x < self.min_pos or self.rect.x > self.max_pos:
+                self.direction *= -1
+                self.rect.x = max(self.min_pos, min(self.rect.x, self.max_pos))
+        else:
+            dy = self.speed * self.direction
+            self.rect.y += int(dy)
+            if self.rect.y < self.min_pos or self.rect.y > self.max_pos:
+                self.direction *= -1
+                self.rect.y = max(self.min_pos, min(self.rect.y, self.max_pos))
+        return dx, dy
+
+
+@dataclass
+class Spike:
+    rect: pygame.Rect
+
+
+@dataclass
+class Enemy:
+    rect: pygame.Rect
+    left_bound: int
+    right_bound: int
+    speed: int = 2
+    direction: int = 1
+
+    def update(self):
+        self.rect.x += self.speed * self.direction
+        if self.rect.left <= self.left_bound or self.rect.right >= self.right_bound:
+            self.direction *= -1
+
+
+class Player:
+    def __init__(self, x: int, y: int):
+        self.rect = pygame.Rect(x, y, PLAYER_W, PLAYER_H)
+        self.vel_x = 0.0
+        self.vel_y = 0.0
+        self.on_ground = False
+        self.last_checkpoint = (x, y)
+
+    def handle_input(self, keys):
+        self.vel_x = 0
+        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+            self.vel_x = -MOVE_SPEED
+        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+            self.vel_x = MOVE_SPEED
+
+    def jump(self):
+        if self.on_ground:
+            self.vel_y = JUMP_SPEED
+            self.on_ground = False
+
+    def apply_gravity(self):
+        self.vel_y += GRAVITY
+        self.vel_y = min(self.vel_y, 14)
+
+
+def build_levels():
+    return [
+        {
+            "name": "Level 1 - Starter Sprint",
+            "start": (80, 450),
+            "finish": pygame.Rect(930, 380, 28, 95),
+            "checkpoint": pygame.Rect(470, 420, 28, 55),
+            "platforms": [
+                Platform(pygame.Rect(0, 520, 1000, 80)),
+                Platform(pygame.Rect(150, 460, 130, 20)),
+                Platform(pygame.Rect(320, 420, 130, 20)),
+                Platform(pygame.Rect(520, 390, 120, 20), True, "x", 500, 760, 2),
+                Platform(pygame.Rect(790, 430, 100, 20)),
+            ],
+            "spikes": [
+                Spike(pygame.Rect(250, 500, 60, 20)),
+                Spike(pygame.Rect(640, 500, 70, 20)),
+            ],
+            "pits": [pygame.Rect(710, 520, 60, 80)],
+            "enemies": [Enemy(pygame.Rect(560, 362, 28, 28), 520, 760)],
+        },
+        {
+            "name": "Level 2 - Flow Route",
+            "start": (60, 450),
+            "finish": pygame.Rect(930, 180, 28, 110),
+            "checkpoint": pygame.Rect(520, 360, 28, 55),
+            "platforms": [
+                Platform(pygame.Rect(0, 520, 1000, 80)),
+                Platform(pygame.Rect(120, 450, 100, 20)),
+                Platform(pygame.Rect(260, 390, 110, 20)),
+                Platform(pygame.Rect(420, 330, 110, 20), True, "y", 250, 420, 2),
+                Platform(pygame.Rect(600, 270, 120, 20)),
+                Platform(pygame.Rect(760, 220, 110, 20), True, "x", 680, 860, 2),
+            ],
+            "spikes": [
+                Spike(pygame.Rect(190, 500, 70, 20)),
+                Spike(pygame.Rect(350, 500, 80, 20)),
+                Spike(pygame.Rect(700, 500, 90, 20)),
+            ],
+            "pits": [pygame.Rect(860, 520, 90, 80)],
+            "enemies": [Enemy(pygame.Rect(620, 242, 28, 28), 600, 720)],
+        },
+    ]
+
+
+def load_best_times():
+    if not os.path.exists(DATA_PATH):
+        return {}
+    try:
+        with open(DATA_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_best_times(times):
+    with open(DATA_PATH, "w", encoding="utf-8") as f:
+        json.dump(times, f, indent=2)
+
+
+def format_time(seconds: float):
+    m = int(seconds // 60)
+    s = seconds % 60
+    return f"{m:02}:{s:05.2f}"
+
+
+def tone(freq=440, ms=100, volume=0.4, sample_rate=44100):
+    n = int(sample_rate * (ms / 1000.0))
+    buf = array.array("h")
+    amp = int(32767 * volume)
+    for i in range(n):
+        t = i / sample_rate
+        buf.append(int(amp * math.sin(2 * math.pi * freq * t)))
+    return pygame.mixer.Sound(buffer=buf)
+
+
+class PlatformerGame:
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("seeded dungeon speedrun")
+        pygame.mixer.init()
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        pygame.display.set_caption("Speedrun Platformer")
         self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont("consolas", 24)
+        self.small = pygame.font.SysFont("consolas", 18)
 
-        self.font = pygame.font.SysFont("consolas", 20)
-        self.small_font = pygame.font.SysFont("consolas", 16)
-        self.big_font = pygame.font.SysFont("consolas", 40)
+        self.snd_jump = tone(620, 70)
+        self.snd_finish = tone(900, 220)
+        self.snd_checkpoint = tone(780, 120)
 
-        self.state = "MENU"  # MENU, RUNNING, PAUSED, GAME_OVER, VICTORY, CHOOSING_PERK
-        self.seed_input = ""
-        self.rng = None
-        self.timer = RunTimer()
-
-        self.floor = 1
-        self.biome_name = "cavern"
-        self.dungeon = None
+        self.levels = build_levels()
+        self.best_times = load_best_times()
+        self.state = "menu"  # menu, running, paused, level_end, game_end
+        self.level_index = 0
+        self.time_left = MAX_LEVEL_TIME
+        self.level_start_ms = 0
+        self.finish_time = None
+        self.checkpoint_msg_timer = 0
+        self.checkpoint_hit = False
         self.player = None
 
-        self.enemies = []
-        self.bullets = []
-        self.boss_bullets = []
-        self.particles = []
-        self.xp_orbs = []
-        self.portal = None
-        self.boss = None
-        self.interactables = []
+    def reset_level(self, index):
+        self.level_index = index
+        level = self.levels[self.level_index]
+        self.player = Player(*level["start"])
+        self.time_left = MAX_LEVEL_TIME
+        self.level_start_ms = pygame.time.get_ticks()
+        self.finish_time = None
+        self.checkpoint_msg_timer = 0
+        self.checkpoint_hit = False
 
-        self.enemy_spawn_timer = 0.0
-        self.enemy_spawn_interval = 3.0
-        self.pickups = []
-        self.chests = []
-        self.portal = None
-        self.boss = None
-        self.boss_rewards_spawned = False
+    def run(self):
+        running = True
+        while running:
+            dt = self.clock.tick(FPS) / 1000
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                self.handle_event(event)
 
-        self.current_perk_choices = []
+            if self.state == "running":
+                self.update(dt)
+            self.draw()
+        pygame.quit()
 
-        self.enemy_spawn_timer = 0.0
-        self.enemy_spawn_interval = 3.0
-        self.dungeon = None
-        self.player = None
+    def handle_event(self, event):
+        if event.type != pygame.KEYDOWN:
+            return
 
-        self.enemies = []
-        self.bullets = []
-        self.enemy_bullets = []
-        self.particles = []
-        self.xp_orbs = []
-        self.portal = None
-        self.boss = None
-
-        self.enemy_spawn_timer = 0.0
-        self.enemy_spawn_interval = 3.0
-        self.elite_spawn_timer = 12.0
-
-        self.cam_x = 0.0
-        self.cam_y = 0.0
-
-        self.score = 0
-
-    # ---------- setup ----------
-    def start_run(self):
-        # initialize rng from seed text
-    def start_run(self):
-        # initialize rng from seed text
-        self.rng = SeedRNG(self.seed_input)
-        self.timer.reset()
-        self.timer.start()
-        self.floor = 1
-        self.score = 0
-        self.current_perk_choices = []
-        self._build_floor()
-        self.state = "RUNNING"
-        self._build_floor()
-        self.state = "RUNNING"
-
-    def _enemy_scalars(self):
-        hp_mult = 1.0 + 0.35 * (self.floor - 1)
-        speed_mult = 1.0 + 0.18 * (self.floor - 1)
-        return hp_mult, speed_mult
-
-    def _choose_enemy_class(self):
-        pool = ENEMY_POOLS.get(self.biome_name, ENEMY_POOLS["cavern"])
-        choices = [p for p in pool if self.floor >= p.get("min_floor", 1)]
-        total = sum(p["weight"] * (1 + 0.12 * (self.floor - 1)) for p in choices)
-        pick = self.rng.random() * total
-        accum = 0.0
-        for p in choices:
-            accum += p["weight"] * (1 + 0.12 * (self.floor - 1))
-            if pick <= accum:
-                return p["cls"]
-        return choices[-1]["cls"]
-
-    def _spawn_enemy(self, elite=False):
-        hp_mult, speed_mult = self._enemy_scalars()
-        if elite:
-            hp_mult *= 1.6
-            speed_mult *= 1.1
-        ex, ey = self.dungeon.random_floor_pos()
-        cls = self._choose_enemy_class()
-        enemy = cls(ex, ey, hp_mult=hp_mult, speed_mult=speed_mult, elite=elite)
-        self.enemies.append(enemy)
-
-    def _build_floor(self):
-        # pick biome from rng
-        self.biome_name = self.rng.choice(BIOMES)
-        self.dungeon = Dungeon(self.rng, self.biome_name)
-        self.interactables = list(self.dungeon.interactables)
-
-        px, py = self.dungeon.random_floor_pos()
-        if self.player is None:
-            self.player = Player(px, py)
-        else:
-            # keep progression but move player to new pos
-            self.player.x = px
-            self.player.y = py
-
-        self.enemies = []
-        self.bullets = []
-        self.boss_bullets = []
-        self.particles = []
-        self.xp_orbs = []
-        self.pickups = []
-        self.chests = []
-        self.portal = None
-        
-        hp_mult = 1.0 + 0.35 * (self.floor - 1)
-        speed_mult = 1.0 + 0.18 * (self.floor - 1)
-
-        # spawn some starting enemies
-        for _ in range(6 + self.floor * 2):
-            ex, ey = self.dungeon.random_floor_pos()
-            self.enemies.append(Enemy(ex, ey, hp_mult=hp_mult, speed_mult=speed_mult))
-
-        self.enemy_bullets = []
-        self.particles = []
-        self.xp_orbs = []
-        self.portal = None
-
-        hp_mult = 1.0 + 0.35 * (self.floor - 1)
-        speed_mult = 1.0 + 0.18 * (self.floor - 1)
-
-        # spawn some starting enemies
-        for _ in range(6 + self.floor * 2):
-            self._spawn_enemy()
-
-        # make boss for this floor
-        bx, by = self.dungeon.random_floor_pos()
-        self.boss = Boss(bx, by, hp_mult=hp_mult, speed_mult=speed_mult)
-
-        # optional rare chest reward
-        if self.rng.random() < 0.55:
-            cx, cy = self.dungeon.random_floor_pos()
-            self.chests.append(RareChest(cx, cy))
-
-        self.enemy_spawn_interval = max(1.4, 3.0 - 0.2 * (self.floor - 1))
-        self.enemy_spawn_timer = 1.0
-        self.boss_rewards_spawned = False
-        self.enemy_spawn_interval = max(1.4, 3.0 - 0.2 * (self.floor - 1))
-        self.enemy_spawn_timer = 1.0
-        self.elite_spawn_timer = max(10.0, 18.0 - self.floor * 1.5)
-
-    # ---------- event handling ----------
-    def handle_events(self):
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
-
-            if self.state == "MENU":
-                self._handle_menu_event(event)
-            elif self.state == "RUNNING":
-                self._handle_running_event(event)
-            elif self.state == "CHOOSING_PERK":
-                self._handle_perk_event(event)
-            elif self.state == "PAUSED":
-                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    self.state = "RUNNING"
-                    self.timer.start()
-            elif self.state in ("GAME_OVER", "VICTORY"):
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_RETURN:
-                        # restart new seed run
-                        self.seed_input = ""
-                        self.state = "MENU"
-                    elif event.key == pygame.K_r:
-                        # repeat same seed
-                        self.state = "RUNNING"
-                        self.start_run()
-
-    def _handle_menu_event(self, event):
-        if event.type == pygame.KEYDOWN:
+        if self.state == "menu":
             if event.key == pygame.K_RETURN:
-                self.start_run()
-            elif event.key == pygame.K_BACKSPACE:
-                self.seed_input = self.seed_input[:-1]
-            elif event.key == pygame.K_ESCAPE:
-                pygame.quit()
-                sys.exit()
-            else:
-                ch = event.unicode
-                if ch.isprintable() and len(self.seed_input) < 20:
-                    self.seed_input += ch
+                self.reset_level(0)
+                self.state = "running"
+            elif event.key == pygame.K_q:
+                pygame.event.post(pygame.event.Event(pygame.QUIT))
 
-    def _handle_running_event(self, event):
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
-                self.state = "PAUSED"
-                self.timer.stop()
-            if event.key == pygame.K_1:
-                self.player.switch_weapon(0)
-            if event.key == pygame.K_2:
-                self.player.switch_weapon(1)
-            if event.key == pygame.K_3:
-                self.player.switch_weapon(2)
-            if event.key == pygame.K_e:
-                self._interact_with_nearby()
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            mx, my = pygame.mouse.get_pos()
-            world = (mx + self.cam_x, my + self.cam_y)
-            if event.button == 1:
-                # shoot
-                if self.player.can_shoot(self.timer.get_time()):
-                    self.player.shoot(world, self.bullets, self.timer.get_time(), self.particles)
-            elif event.button == 3:
-                # dash
-                self.player.start_dash(world)
+        elif self.state == "running":
+            if event.key == pygame.K_SPACE:
+                self.player.jump()
+                self.snd_jump.play()
+            elif event.key == pygame.K_p:
+                self.state = "paused"
 
-    def _handle_perk_event(self, event):
-        if event.type == pygame.KEYDOWN:
-            if event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
-                idx = {pygame.K_1: 0, pygame.K_2: 1, pygame.K_3: 2}[event.key]
-                self._select_perk(idx)
+        elif self.state == "paused":
+            if event.key == pygame.K_p:
+                self.state = "running"
+                self.level_start_ms = pygame.time.get_ticks() - int((MAX_LEVEL_TIME - self.time_left) * 1000)
 
-    def _open_perk_choice(self):
-        if not self.player.has_pending_perk():
-            return
-        self.current_perk_choices = self.player.pop_perk_choices()
-        self.state = "CHOOSING_PERK"
-        self.timer.stop()
+        elif self.state == "level_end":
+            if event.key == pygame.K_r:
+                self.reset_level(self.level_index)
+                self.state = "running"
+            elif event.key == pygame.K_n and self.level_index + 1 < len(self.levels):
+                self.reset_level(self.level_index + 1)
+                self.state = "running"
+            elif event.key == pygame.K_n:
+                self.state = "game_end"
 
-    def _select_perk(self, index):
-        if not self.current_perk_choices:
-            return
-        if 0 <= index < len(self.current_perk_choices):
-            choice = self.current_perk_choices[index]
-            self.player.apply_perk(choice["id"])
-            self.current_perk_choices = []
-            if self.player.has_pending_perk():
-                self._open_perk_choice()
-            else:
-                self.state = "RUNNING"
-                self.timer.start()
+        elif self.state == "game_end":
+            if event.key == pygame.K_RETURN:
+                self.state = "menu"
 
-    def _choose_locked_weapon(self):
-        locked = [w for w in WEAPONS.keys() if w not in self.player.unlocked_weapons]
-        if not locked:
-            return None
-        return self.rng.choice(locked)
-
-    def _spawn_chest_reward(self, x, y):
-        weapon_choice = self._choose_locked_weapon()
-        if weapon_choice is not None and self.rng.random() < 0.35:
-            self.pickups.append(Pickup(x, y - 10, weapon_choice, "weapon", (220, 230, 255), weapon_choice))
-        else:
-            relic_id = self.rng.choice(list(RELIC_POOL.keys()))
-            relic = RELIC_POOL[relic_id]
-            self.pickups.append(Pickup(x, y - 10, relic["name"], "relic", relic["color"], relic_id))
-
-    def _spawn_boss_rewards(self):
-        relic_id = self.rng.choice(list(RELIC_POOL.keys()))
-        relic = RELIC_POOL[relic_id]
-        self.pickups.append(Pickup(self.boss.x - 24, self.boss.y - 10, relic["name"], "relic", relic["color"], relic_id))
-
-        weapon_choice = self._choose_locked_weapon()
-        if weapon_choice is not None:
-            self.pickups.append(Pickup(self.boss.x + 24, self.boss.y - 10, weapon_choice, "weapon", (220, 230, 255), weapon_choice))
-        else:
-            self.pickups.append(
-                Pickup(
-                    self.boss.x + 24,
-                    self.boss.y - 10,
-                    "tonic",
-                    "consumable",
-                    (180, 255, 200),
-                    {"heal": 35, "energy": 35},
-                )
-            )
-
-    def _collect_pickup(self, pickup):
-        if pickup.kind == "weapon":
-            self.player.unlocked_weapons.add(pickup.payload)
-        elif pickup.kind == "relic":
-            self.player.add_relic(pickup.payload)
-        elif pickup.kind == "consumable":
-            payload = pickup.payload
-            self.player.heal(payload.get("heal", 0))
-            self.player.give_energy(payload.get("energy", 0))
-
-    # ---------- update ----------
     def update(self, dt):
-        if self.state == "CHOOSING_PERK":
-            return
-        if self.state != "RUNNING":
-            return
-
-        self.timer.update(dt)
-
+        level = self.levels[self.level_index]
         keys = pygame.key.get_pressed()
-        self.player.update(dt, keys, self.dungeon)
-        if self.player.check_level(self.rng) or (self.player.has_pending_perk() and not self.current_perk_choices):
-            self._open_perk_choice()
+        self.player.handle_input(keys)
+
+        elapsed = (pygame.time.get_ticks() - self.level_start_ms) / 1000
+        self.time_left = max(0, MAX_LEVEL_TIME - elapsed)
+
+        if self.time_left <= 0:
+            self.respawn()
+            self.time_left = MAX_LEVEL_TIME
+            self.level_start_ms = pygame.time.get_ticks()
+
+        prev_rect = self.player.rect.copy()
+
+        self.player.rect.x += int(self.player.vel_x)
+        for platform in level["platforms"]:
+            if self.player.rect.colliderect(platform.rect):
+                if self.player.vel_x > 0:
+                    self.player.rect.right = platform.rect.left
+                elif self.player.vel_x < 0:
+                    self.player.rect.left = platform.rect.right
+
+        self.player.apply_gravity()
+        self.player.rect.y += int(self.player.vel_y)
+        self.player.on_ground = False
+
+        for platform in level["platforms"]:
+            dx, dy = platform.update()
+            if self.player.rect.colliderect(platform.rect):
+                if prev_rect.bottom <= platform.rect.top and self.player.vel_y >= 0:
+                    self.player.rect.bottom = platform.rect.top
+                    self.player.vel_y = 0
+                    self.player.on_ground = True
+                    if platform.moving:
+                        self.player.rect.x += int(dx)
+                        self.player.rect.y += int(dy)
+                elif prev_rect.top >= platform.rect.bottom and self.player.vel_y < 0:
+                    self.player.rect.top = platform.rect.bottom
+                    self.player.vel_y = 0
+
+        for enemy in level["enemies"]:
+            enemy.update()
+            if self.player.rect.colliderect(enemy.rect):
+                self.respawn()
+                return
+
+        for spike in level["spikes"]:
+            if self.player.rect.colliderect(spike.rect):
+                self.respawn()
+                return
+
+        for pit in level["pits"]:
+            if self.player.rect.colliderect(pit):
+                self.respawn()
+                return
+
+        if self.player.rect.top > HEIGHT + 100:
+            self.respawn()
             return
 
-        for chest in self.chests:
-            chest.update(dt)
-            if chest.try_open(self.player.center()):
-                self._spawn_chest_reward(chest.x, chest.y)
+        checkpoint = level["checkpoint"]
+        if not self.checkpoint_hit and self.player.rect.colliderect(checkpoint):
+            self.player.last_checkpoint = (checkpoint.x, checkpoint.y - PLAYER_H)
+            self.checkpoint_hit = True
+            self.checkpoint_msg_timer = 2.0
+            self.snd_checkpoint.play()
 
-        for pickup in list(self.pickups):
-            pickup.update(dt)
-            if pickup.can_collect(self.player.center()):
-                self._collect_pickup(pickup)
-                self.pickups.remove(pickup)
+        if self.checkpoint_msg_timer > 0:
+            self.checkpoint_msg_timer -= dt
 
-        # camera follows player
-        self.cam_x += ((self.player.x - WIDTH / 2) - self.cam_x) * 0.15
-        self.cam_y += ((self.player.y - HEIGHT / 2) - self.cam_y) * 0.15
+        if self.player.rect.colliderect(level["finish"]):
+            self.finish_time = MAX_LEVEL_TIME - self.time_left
+            key = f"level_{self.level_index + 1}"
+            best = self.best_times.get(key)
+            if best is None or self.finish_time < best:
+                self.best_times[key] = self.finish_time
+                save_best_times(self.best_times)
+            self.snd_finish.play()
+            self.state = "level_end"
 
-        # enemies
-        spawned = []
-        for e in self.enemies:
-            e.update(dt, self.player.center(), self.dungeon, self.enemy_bullets, self.rng, spawned)
-        if spawned:
-            self.enemies.extend(spawned)
+    def respawn(self):
+        self.player.rect.topleft = self.player.last_checkpoint
+        self.player.vel_x = 0
+        self.player.vel_y = 0
 
-        # boss
-        if self.boss is not None and self.boss.is_alive():
-            self.boss.update(dt, self.player.center(), self.dungeon, self.boss_bullets)
-        elif self.portal is None:
-            # boss dead, spawn portal once
-            if not self.boss_rewards_spawned:
-                self._spawn_boss_rewards()
-                self.boss_rewards_spawned = True
-        # boss
-        if self.boss is not None and self.boss.is_alive():
-            self.boss.update(dt, self.player.center(), self.dungeon, self.enemy_bullets, self.rng, spawned)
-            if spawned:
-                self.enemies.extend(spawned)
-        elif self.portal is None:
-            # boss dead, spawn portal once
-            self.portal = Portal(self.player.x, self.player.y - 40)
-
-        # spawn new enemies periodically
-        self.enemy_spawn_timer -= dt
-        self.elite_spawn_timer -= dt
-        if self.enemy_spawn_timer <= 0:
-            self.enemy_spawn_timer = self.enemy_spawn_interval
-            self._spawn_enemy()
-        if self.elite_spawn_timer <= 0:
-            self.elite_spawn_timer = max(12.0, 20.0 - self.floor * 2)
-            self._spawn_enemy(elite=True)
-
-        # bullets
-        for b in list(self.bullets):
-            b.update(dt, self.dungeon)
-            if b.life <= 0:
-                self.bullets.remove(b)
-
-        for b in list(self.enemy_bullets):
-            b.update(dt, self.dungeon)
-            if b.life <= 0:
-                self.enemy_bullets.remove(b)
-
-        # xp orbs
-        for orb in self.xp_orbs:
-            orb.update(dt, self.player.center())
-
-        # particles
-        for p in list(self.particles):
-            p.update(dt)
-            if p.life <= 0:
-                self.particles.remove(p)
-
-        # collisions: bullets vs enemies
-        for b in list(self.bullets):
-            hit_any = False
-            for e in self.enemies:
-                if e.is_alive() and distance((b.x, b.y), (e.x, e.y)) < 18:
-                    e.take_damage(b.damage, self.particles)
-                    if self.player.lifesteal > 0:
-                        self.player.heal(b.damage * self.player.lifesteal)
-                    hit_any = True
-                    if not e.is_alive():
-                        self.player.kills += 1
-                        self.score += 10
-                        self.player.add_xp(18 + 2 * self.floor)
-                        self.xp_orbs.append(XpOrb(e.x, e.y, 12 + 2 * self.floor))
-            if self.boss is not None and self.boss.is_alive():
-                if distance((b.x, b.y), (self.boss.x, self.boss.y)) < 40:
-                    self.boss.take_damage(b.damage, self.particles)
-                    if self.player.lifesteal > 0:
-                        self.player.heal(b.damage * self.player.lifesteal)
-                    hit_any = True
-                    if not self.boss.is_alive():
-                        self.score += 200
-                        self.player.add_xp(80 + 20 * self.floor)
-            if hit_any and b in self.bullets:
-                self.bullets.remove(b)
-
-        # enemy contact damage
-        for e in self.enemies:
-            if e.is_alive() and distance(self.player.center(), (e.x, e.y)) < 20:
-                self.player.hurt(25 * dt, self.particles)
-
-        # boss bullet damage
-        for b in self.boss_bullets:
-            if distance(self.player.center(), (b.x, b.y)) < 18:
-                self.player.hurt(40 * dt, self.particles)
-        for b in self.enemy_bullets:
-            if distance(self.player.center(), (b.x, b.y)) < 18:
-                self.player.hurt(b.damage * dt, self.particles)
-
-        # hazard effects
-        hazard = self.dungeon.hazard_at(self.player.x, self.player.y)
-        if hazard:
-            self._apply_hazard_effect(hazard, dt)
-
-        # xp pickup
-        for orb in list(self.xp_orbs):
-            if distance(self.player.center(), (orb.x, orb.y)) < 18:
-                self.player.add_xp(orb.value)
-                self.xp_orbs.remove(orb)
-
-        # portal usage
-        if self.portal is not None:
-            if self.portal.collides_with(self.player.center()):
-                self.timer.split()
-                if self.floor < MAX_FLOORS:
-                    self.floor += 1
-                    self._build_floor()
-                else:
-                    self.state = "VICTORY"
-                    self.timer.stop()
-
-        # death
-        if self.player.hp <= 0:
-            self.state = "GAME_OVER"
-            self.timer.stop()
-
-    # ---------- drawing ----------
     def draw(self):
-        if self.state == "MENU":
-            self._draw_menu()
-        else:
-            self._draw_world()
+        self.screen.fill((145, 200, 255))
+
+        if self.state == "menu":
+            self.draw_menu()
+        elif self.state in ("running", "paused", "level_end", "game_end"):
+            self.draw_level()
+            if self.state == "paused":
+                self.draw_center_msg("Paused - Press P to Resume")
+            elif self.state == "level_end":
+                self.draw_level_end()
+            elif self.state == "game_end":
+                self.draw_game_end()
 
         pygame.display.flip()
 
-    def _draw_menu(self):
-        self.screen.fill(BLACK)
-        draw_text_center(self.screen, self.big_font, "seeded dungeon speedrun", WHITE, HEIGHT // 3)
-        draw_text_center(self.screen, self.font, "type a seed (or leave empty)", GRAY, HEIGHT // 3 + 60)
-        draw_text_center(self.screen, self.font, "press enter to start", GRAY, HEIGHT // 3 + 90)
+    def draw_menu(self):
+        title = self.font.render("2D Speedrun Platformer", True, (15, 20, 30))
+        hint = self.small.render("Enter: Start    Q: Quit", True, (20, 30, 40))
+        ctrl = self.small.render("Move: A/D or Arrow Keys, Jump: Space, Pause: P", True, (20, 30, 40))
+        self.screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 220))
+        self.screen.blit(ctrl, (WIDTH // 2 - ctrl.get_width() // 2, 270))
+        self.screen.blit(hint, (WIDTH // 2 - hint.get_width() // 2, 310))
 
-        seed_display = self.seed_input if self.seed_input else "<random>"
-        draw_text_center(self.screen, self.font, f"seed: {seed_display}", CYAN, HEIGHT // 3 + 130)
+    def draw_level(self):
+        level = self.levels[self.level_index]
 
-    def _draw_world(self):
-        # fill background
-        style = BIOME_STYLES.get(self.biome_name, BIOME_STYLES["cavern"])
-        base_col = style["floor"]
-        self.screen.fill(base_col)
+        pygame.draw.rect(self.screen, (30, 140, 45), (0, 520, WIDTH, 80))
 
-        # draw dungeon tiles
-        self.dungeon.draw(self.screen, self.cam_x, self.cam_y)
+        for platform in level["platforms"]:
+            pygame.draw.rect(self.screen, (80, 80, 85), platform.rect)
 
-        # highlight nearby interactables
-        for obj in self.interactables:
-            if obj.is_active() and distance(self.player.center(), (obj.x, obj.y)) < 70:
-                self._draw_interact_prompt(obj)
-        for chest in self.chests:
-            chest.draw(self.screen, self.cam_x, self.cam_y)
+        for spike in level["spikes"]:
+            pygame.draw.rect(self.screen, (180, 30, 30), spike.rect)
 
-        # draw orbs
-        for orb in self.xp_orbs:
-            orb.draw(self.screen, self.cam_x, self.cam_y)
+        for pit in level["pits"]:
+            pygame.draw.rect(self.screen, (30, 30, 35), pit)
 
-        for pickup in self.pickups:
-            pickup.draw(self.screen, self.cam_x, self.cam_y)
+        for enemy in level["enemies"]:
+            pygame.draw.rect(self.screen, (170, 50, 210), enemy.rect)
 
-        # draw bullets
-        for b in self.bullets:
-            b.draw(self.screen, self.cam_x, self.cam_y)
-        for b in self.boss_bullets:
-            b.draw(self.screen, self.cam_x, self.cam_y)
-        # draw dungeon tiles
-        self.dungeon.draw(self.screen, self.cam_x, self.cam_y)
+        cp = level["checkpoint"]
+        pygame.draw.rect(self.screen, (240, 215, 70), cp, 3)
 
-        # draw orbs
-        for orb in self.xp_orbs:
-            orb.draw(self.screen, self.cam_x, self.cam_y)
-
-        # draw bullets
-        for b in self.bullets:
-            b.draw(self.screen, self.cam_x, self.cam_y)
-        for b in self.enemy_bullets:
-            b.draw(self.screen, self.cam_x, self.cam_y)
-
-        # draw enemies and boss
-        for e in self.enemies:
-            e.draw(self.screen, self.cam_x, self.cam_y)
-
-        if self.boss is not None and self.boss.is_alive():
-            self.boss.draw(self.screen, self.cam_x, self.cam_y, WIDTH)
-
-        # draw particles
-        for p in self.particles:
-            p.draw(self.screen, self.cam_x, self.cam_y)
-
-        # draw portal
-        if self.portal is not None:
-            self.portal.draw(self.screen, self.cam_x, self.cam_y, self.timer.get_time())
-
-        # draw player
-        self.player.draw(self.screen, self.cam_x, self.cam_y, pygame.mouse.get_pos())
-
-        # lighting overlay
-        light = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        light.fill((0, 0, 0, 220))
-        px = self.player.x - self.cam_x
-        py = self.player.y - self.cam_y
-        light_radius = style["light_radius"]
-        pygame.draw.circle(light, (0, 0, 0, 0), (int(px), int(py)), light_radius)
-        self.screen.blit(light, (0, 0))
-
-        # hud
-        self._draw_hud()
-
-        if self.state == "CHOOSING_PERK":
-            self._draw_perk_overlay()
-
-        if self.state == "PAUSED":
-            self._draw_pause()
-        elif self.state == "GAME_OVER":
-            self._draw_death()
-        elif self.state == "VICTORY":
-            self._draw_victory()
-
-    def _draw_hud(self):
-        # hp / energy / xp bars and time
-        x = 16
-        y = HEIGHT - 26
-
-        # hp
-        bar_w = 260
-        bar_h = 16
-
-        pygame.draw.rect(self.screen, DARK_GRAY, (x - 2, y - 2, bar_w + 4, bar_h + 4))
-        hp_ratio = self.player.hp / self.player.max_hp
-        pygame.draw.rect(self.screen, (200, 60, 60), (x, y, int(bar_w * hp_ratio), bar_h))
-        txt = self.font.render(f"hp {int(self.player.hp)}/{self.player.max_hp}", True, WHITE)
-        self.screen.blit(txt, (x, y - 24))
-
-        # energy
-        y -= 40
-        pygame.draw.rect(self.screen, DARK_GRAY, (x - 2, y - 2, bar_w + 4, bar_h + 4))
-        en_ratio = self.player.energy / self.player.max_energy
-        pygame.draw.rect(self.screen, CYAN, (x, y, int(bar_w * en_ratio), bar_h))
-        txt = self.font.render(f"energy {int(self.player.energy)}/{self.player.max_energy}", True, WHITE)
-        self.screen.blit(txt, (x, y - 24))
-
-        # xp
-        y -= 40
-        pygame.draw.rect(self.screen, DARK_GRAY, (x - 2, y - 2, bar_w + 4, bar_h + 4))
-        xp_ratio = self.player.xp / max(1, self.player.xp_to_next)
-        pygame.draw.rect(self.screen, GREEN, (x, y, int(bar_w * xp_ratio), bar_h))
-        txt = self.font.render(f"lvl {self.player.level}", True, WHITE)
-        self.screen.blit(txt, (x, y - 24))
-
-        # time + floor + score
-        time_text = self.font.render(f"time {format_time(self.timer.get_time())}", True, YELLOW)
-        self.screen.blit(time_text, (WIDTH - 230, HEIGHT - 32))
-
-        info = self.small_font.render(
-            f"floor {self.floor}/{MAX_FLOORS}  score {self.score}  kills {self.player.kills}",
-            True,
-            WHITE,
-        )
-        self.screen.blit(info, (16, 16))
-
-        # weapons
-        wnames = sorted(list(self.player.unlocked_weapons))
-        wx = WIDTH - 260
-        wy = HEIGHT - 110
-        panel_h = 140
-        pygame.draw.rect(self.screen, (15, 15, 15), (wx, wy - 40, 240, panel_h))
-        pygame.draw.rect(self.screen, GRAY, (wx, wy - 40, 240, panel_h), 2)
-        label = self.small_font.render("weapons 1-3", True, WHITE)
-        self.screen.blit(label, (wx + 10, wy - 34))
-
-        for i, name in enumerate(wnames[:3]):
-            active = (name == self.player.current_weapon)
-            col = CYAN if active else GRAY
-            wt = self.small_font.render(f"{i+1}: {name}", True, col)
-            self.screen.blit(wt, (wx + 10 + i * 70, wy - 12))
-
-        # perks row
-        perk_label = self.small_font.render("perks", True, WHITE)
-        self.screen.blit(perk_label, (wx + 10, wy + 12))
-        for i, perk in enumerate(self.player.perk_history[-6:]):
-            px = wx + 10 + i * 36
-            py = wy + 36
-            rect = pygame.Rect(px, py, 26, 26)
-            pygame.draw.rect(self.screen, perk.get("color", CYAN), rect)
-            pygame.draw.rect(self.screen, DARK_GRAY, rect, 2)
-
-        # relic row
-        relic_label = self.small_font.render("relics", True, WHITE)
-        self.screen.blit(relic_label, (wx + 10, wy + 72))
-        for i, relic in enumerate(self.player.relics[-6:]):
-            rx = wx + 10 + i * 36
-            ry = wy + 96
-            rect = pygame.Rect(rx, ry, 26, 26)
-            pygame.draw.rect(self.screen, relic.get("color", CYAN), rect)
-            pygame.draw.rect(self.screen, DARK_GRAY, rect, 2)
-
-        # minimap
-        self.dungeon.draw_minimap(self.screen, self.player.center(), self.floor, self.rng.seed_string)
-
-    def _interact_with_nearby(self):
-        best = None
-        best_d = 9999
-        for obj in self.interactables:
-            if not obj.is_active():
-                continue
-            d = distance(self.player.center(), (obj.x, obj.y))
-            if d < 70 and d < best_d:
-                best_d = d
-                best = obj
-        if best is not None:
-            best.interact(self.player, self.particles, self.rng)
-
-    def _apply_hazard_effect(self, hazard, dt):
-        htype = hazard.get("type")
-        if htype == "lava":
-            self.player.hurt(30 * dt, self.particles)
-        elif htype == "ice":
-            dx, dy = self.player.last_move_dir
-            slip_speed = 90
-            new_x = self.player.x + dx * slip_speed * dt
-            new_y = self.player.y + dy * slip_speed * dt
-            if not self.dungeon.is_solid_world(new_x, self.player.y):
-                self.player.x = new_x
-            if not self.dungeon.is_solid_world(self.player.x, new_y):
-                self.player.y = new_y
-        elif htype == "curse":
-            self.player.hurt(18 * dt, self.particles)
-            self.player.energy = max(0, self.player.energy - 10 * dt)
-        elif htype == "conveyor":
-            dir_x, dir_y = hazard.get("dir", (0, 0))
-            push = 130
-            new_x = self.player.x + dir_x * push * dt
-            new_y = self.player.y + dir_y * push * dt
-            if not self.dungeon.is_solid_world(new_x, self.player.y):
-                self.player.x = new_x
-            if not self.dungeon.is_solid_world(self.player.x, new_y):
-                self.player.y = new_y
-
-    def _draw_interact_prompt(self, obj):
-        hint_font = pygame.font.SysFont("consolas", 14)
-        text = hint_font.render("E", True, YELLOW)
-        bx = obj.x - self.cam_x - text.get_width() // 2
-        by = obj.y - self.cam_y - TILE_SIZE * 0.5
-        self.screen.blit(text, (bx, by))
-    def _draw_perk_overlay(self):
-        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 170))
-        self.screen.blit(overlay, (0, 0))
-
-        draw_text_center(self.screen, self.big_font, "level up!", WHITE, HEIGHT // 2 - 120)
-        draw_text_center(self.screen, self.small_font, "press 1-3 to choose a perk", GRAY, HEIGHT // 2 - 80)
-
-        total = len(self.current_perk_choices)
-        if total == 0:
-            return
-        spacing = 200
-        start_x = WIDTH // 2 - (spacing * (total - 1)) // 2
-        for i, perk in enumerate(self.current_perk_choices):
-            box = pygame.Rect(0, 0, 180, 110)
-            box.center = (start_x + i * spacing, HEIGHT // 2 + 20)
-            pygame.draw.rect(self.screen, DARK_GRAY, box.inflate(6, 6))
-            pygame.draw.rect(self.screen, perk.get("color", CYAN), box, 2)
-
-            key_txt = self.small_font.render(f"[{i+1}] {perk['name']}", True, WHITE)
-            self.screen.blit(key_txt, (box.x + 10, box.y + 10))
-            desc_txt = self.small_font.render(perk["desc"], True, WHITE)
-            self.screen.blit(desc_txt, (box.x + 10, box.y + 40))
-
-    def _draw_pause(self):
-        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 170))
-        self.screen.blit(overlay, (0, 0))
-        draw_text_center(self.screen, self.big_font, "paused", WHITE, HEIGHT // 2 - 20)
-        draw_text_center(self.screen, self.small_font, "press esc to resume", GRAY, HEIGHT // 2 + 20)
-
-    def _draw_death(self):
-        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 200))
-        self.screen.blit(overlay, (0, 0))
-        draw_text_center(self.screen, self.big_font, "you died", (255, 80, 80), HEIGHT // 3)
-        draw_text_center(
+        finish = level["finish"]
+        pygame.draw.rect(self.screen, (35, 30, 30), (finish.x + 10, finish.y, 4, finish.h))
+        pygame.draw.polygon(
             self.screen,
-            self.font,
-            f"time {format_time(self.timer.get_time())}   floor {self.floor}   score {self.score}",
-            WHITE,
-            HEIGHT // 3 + 60,
-        )
-        draw_text_center(
-            self.screen,
-            self.small_font,
-            "enter = new seed   r = retry same seed",
-            GRAY,
-            HEIGHT // 3 + 100,
+            (255, 60, 60),
+            [(finish.x + 14, finish.y), (finish.x + 42, finish.y + 12), (finish.x + 14, finish.y + 24)],
         )
 
-    def _draw_victory(self):
-        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 210))
-        self.screen.blit(overlay, (0, 0))
-        draw_text_center(self.screen, self.big_font, "victory", (120, 255, 120), HEIGHT // 3)
-        draw_text_center(
-            self.screen,
-            self.font,
-            f"final time {format_time(self.timer.get_time())}   score {self.score}",
-            GRAY,
-            HEIGHT // 3 + 60,
-        )
+        pygame.draw.rect(self.screen, (25, 90, 220), self.player.rect)
 
-        # splits per floor
-        y = HEIGHT // 3 + 100
-        for i, t in enumerate(self.timer.splits, start=1):
-            txt = self.small_font.render(f"floor {i} split: {format_time(t)}", True, GRAY)
-            self.screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, y))
-            y += 20
+        timer_t = self.font.render(f"Time Left: {self.time_left:05.2f}", True, (20, 20, 20))
+        level_t = self.small.render(level["name"], True, (20, 20, 20))
+        self.screen.blit(timer_t, (20, 15))
+        self.screen.blit(level_t, (20, 45))
 
-        draw_text_center(
-            self.screen,
-            self.small_font,
-            "enter = new seed   r = retry same seed",
-            GRAY,
-            y + 20,
-        )
+        key = f"level_{self.level_index + 1}"
+        best = self.best_times.get(key)
+        best_text = "--" if best is None else format_time(best)
+        best_t = self.small.render(f"Best: {best_text}", True, (20, 20, 20))
+        self.screen.blit(best_t, (820, 15))
 
-    # ---------- main loop ----------
-    def run(self):
-        while True:
-            dt = self.clock.tick(FPS) / 1000.0
-            self.handle_events()
-            self.update(dt)
-            self.draw()
+        if self.checkpoint_msg_timer > 0:
+            msg = self.font.render("Checkpoint Reached!", True, (255, 255, 255))
+            self.screen.blit(msg, (WIDTH // 2 - msg.get_width() // 2, 80))
+
+    def draw_center_msg(self, text):
+        surf = self.font.render(text, True, (255, 255, 255))
+        bg = pygame.Surface((surf.get_width() + 30, surf.get_height() + 20), pygame.SRCALPHA)
+        bg.fill((0, 0, 0, 130))
+        self.screen.blit(bg, (WIDTH // 2 - bg.get_width() // 2, HEIGHT // 2 - bg.get_height() // 2))
+        self.screen.blit(surf, (WIDTH // 2 - surf.get_width() // 2, HEIGHT // 2 - surf.get_height() // 2))
+
+    def draw_level_end(self):
+        level_no = self.level_index + 1
+        msg = f"Level {level_no} complete in {format_time(self.finish_time)}"
+        next_hint = "N: next level" if level_no < len(self.levels) else "N: final results"
+        lines = [msg, "R: retry level", next_hint]
+        self.draw_overlay(lines)
+
+    def draw_game_end(self):
+        lines = ["Run complete! Best Times:"]
+        for i in range(len(self.levels)):
+            key = f"level_{i + 1}"
+            best = self.best_times.get(key)
+            lines.append(f"Level {i + 1}: {'--' if best is None else format_time(best)}")
+        lines.append("Press Enter for Menu")
+        self.draw_overlay(lines)
+
+    def draw_overlay(self, lines):
+        box = pygame.Surface((640, 260), pygame.SRCALPHA)
+        box.fill((0, 0, 0, 165))
+        self.screen.blit(box, (WIDTH // 2 - 320, HEIGHT // 2 - 130))
+        for i, line in enumerate(lines):
+            surf = self.small.render(line, True, (255, 255, 255))
+            self.screen.blit(surf, (WIDTH // 2 - surf.get_width() // 2, HEIGHT // 2 - 95 + i * 34))
+
 
 if __name__ == "__main__":
-    Game().run()
+    PlatformerGame().run()
